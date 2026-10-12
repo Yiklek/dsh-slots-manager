@@ -1,43 +1,77 @@
 /**
- * dsh-settings-manager — host half, TypeScript source.
+ * dsh-slots-manager — host half, TypeScript source.
  *
  * The real work happens in the browser half (src/client.ts): it patches the
- * client slot registry so every `settings.section` registration passes through
- * the manager policy, and contributes its own "Settings Manager" section.
+ * client slot registry so every registration into a MANAGED slot passes through
+ * the manager policy, and contributes the manager's own settings section.
  *
- * This host half registers the plugin's `settings-manager` settings NAMESPACE
- * so the policy can be persisted server-side through the DSH settings seam
- * (SettingsProvider stores the user document on disk). The client reads/writes
- * it over the `remote.settings` RPC face. The plugin holds no own state here —
- * the settings service is the single source of truth.
+ * This half exists to give the policy somewhere to LIVE. DSH's settings service
+ * does not accept arbitrary namespaces — `settings.write()` resolves the
+ * namespace by looking the id up among the profile's **configurable plugin
+ * entries**:
  *
- * Runtime deps `@deepseek-ai/dsh-settings` and `@deepseek-ai/schemastery` are
+ *   const entry = configEditor.entries().find((row) => row.options.id === ns)
+ *   const schema = entry?.fiber?.runtime?.Config
+ *   if (entry === undefined || schema === undefined) throw new Error(`No configurable plugin entry "${ns}"`)
+ *
+ * So the namespace id must BE this plugin's entry id (`slots-manager`, from
+ * cordis.patch.yml), and the schema must be this module's `Config`. Fields
+ * marked `meta.volatile` are the ones the settings form may edit — here the
+ * whole document, because the plugin's entire config IS the policy.
+ *
+ * The host deliberately keeps no state: the settings service owns the value,
+ * and the browser half reads/writes it over the `remote.settings` wire face.
+ *
+ * Runtime deps `@deepseek-ai/schemastery` and `@deepseek-ai/cordis` are
  * provided by the DSH runtime (peerDependencies) and resolved at runtime, not
  * bundled into host.mjs.
  */
 import Schema from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
-// Type-only: pulls in the Context augmentation (`ctx.settings`) without a
-// runtime import (the host bundle resolves nothing from this package).
-import type {} from '@deepseek-ai/dsh-settings'
 
 /**
- * Schemastery schema for the manager policy document. Keys are dynamic (any
- * registered section id), so the three maps are dicts (arbitrary keys, fixed
- * value type): hidden → boolean, order → number, labels → string.
+ * Policy for ONE slot: entry id → override. The keys are dynamic (any id a
+ * plugin registers), so each map is a dict: hidden → boolean, order → number,
+ * labels → string.
  */
-const policySchema = Schema.object({
+const slotPolicySchema = Schema.object({
   hidden: Schema.dict(Schema.boolean()).default({}),
   order: Schema.dict(Schema.number()).default({}),
   labels: Schema.dict(Schema.string()).default({}),
 })
 
-export const name = 'dsh-settings-manager'
+/**
+ * The persisted document, keyed by SLOT first and by entry id inside each slot.
+ *
+ * That nesting is required, not cosmetic: entry ids are only unique within a
+ * slot, and collisions across slots are real — `dsh-client-ui-plugin-manager`
+ * contributes the sidebar panel id `plugins`, which is also a settings section
+ * id. A flat id map would make hiding one hide the other.
+ *
+ * `version` is reserved for future shape evolution.
+ */
+const configSchema = Schema.object({
+  version: Schema.number().default(1),
+  slots: Schema.dict(slotPolicySchema).default({}),
+})
+
+// Mark the whole schema volatile so the settings form may edit every field.
+//
+// `.volatile()` is NOT used here: it only exists because DSH augments
+// schemastery's prototype (`Schema.prototype.volatile = …`), it is absent from
+// this package's own typings, and it throws if applied twice. `extra()` — the
+// API `.volatile()` itself calls — is typed too narrowly for the key in the
+// published schemastery, so the meta is set directly. All three spellings
+// produce the same `meta.volatile`, which is the only thing DSH reads.
+;(configSchema.meta as unknown as Record<string, unknown>).volatile = true
+
+export const Config = configSchema
+
+export const name = 'dsh-slots-manager'
 
 export function apply(ctx: Context): void {
-  // The settings service owns the value; the host keeps no shadow state. The
-  // namespace string is validated by the settings service at runtime.
-  ctx.inject(['settings'], (sctx) => {
-    sctx.settings.register('settings-manager', policySchema)
-  })
+  // No work to do. Merely being a mounted entry with a `Config` is what makes
+  // `slots-manager` a settings namespace; the settings service reads the schema
+  // off the loader entry, and the browser half owns every value.
+  void ctx
 }

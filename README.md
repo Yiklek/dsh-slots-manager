@@ -1,98 +1,168 @@
-# dsh-settings-manager
+# dsh-slots-manager
 
-DSH web 插件：**管理其他插件在「全局设置」对话框中的放置**——显示/隐藏、排序、改名——**不需要修改上游**（deepseek-harness）。
+DSH web 插件：**编排其他插件贡献到界面上的槽位条目**——显示/隐藏、排序、改名——**不需要修改上游**（deepseek-harness）。
 
-## 它做什么
+它由两部分组成：
 
-在「设置 → 设置编排」中列出所有已注册的设置分区（含内置的通用设置/模型/插件等 base 分区），支持：
+- 一个**槽位无关的引擎**：在客户端槽位注册表（`ctx.slots`）的原型上打三个补丁，对每个纳管槽位套用一份策略；
+- 一张**槽位表**（[`src/slots.ts`](src/slots.ts)）：唯一写明具体槽位的地方。**加一个槽位 = 加一行。**
 
-- **隐藏 / 显示**：隐藏的分区立即从设置导航消失（内容也不会渲染），随时可恢复；
-- **上移 / 下移 / 拖拽排序**：上移/下移按钮交换相邻分区；也可按住行首抓手拖到任意行的前/后，落点处显示蓝色插入指示线（带滞回，避免闪烁），松手即按插入位置重排——所有分区重编号为 10 的整数倍，精确且无冲突；
-- **改名**：点铅笔进入行内编辑，Enter/失焦提交、Esc 取消；空值或等于原名即恢复原名。改的是设置导航名，分区内容头仍由插件自渲染、不受影响；
-- **重置 / 全部恢复默认**：清除某个（或所有）分区的策略（含隐藏/顺序/改名），回到插件自身注册的原始值；
-- **设置导航滚动**：设置外壳的导航列本身不滚动，分区多了会把底部几项裁掉（够不着）；本插件注入 CSS 让 `[role="dialog"] nav` 变为 `overflow-y: auto`，任何分区（包括排到末尾的）都能滚到——这也是"管理放置"的前提；
-- **窄屏适配**：≤520px 视口下导航栏收窄、行动作紧凑（隐藏拖拽抓手、缩小图标），避免行内容溢出；
-- **i18n**：内置简体中文与英文（`settingsManager` 命名空间，跟随外壳语言，默认回退英文）；
-- 展示每个分区的 id 与来源插件（registrant）。
+## 管理哪些槽位
 
-所有改动**即时生效**，无需重启。策略通过 **DSH 标准 settings 命名空间**（`settings-manager`）持久化到服务端：host 半区经 `ctx.inject(['settings'], ...)` 用 `settings.register` 注册命名空间，客户端经 `remote.settings` Remote RPC 读写，由 SettingsProvider 落盘（纯服务端）。
+| 槽位 | 位置 | 隐藏 | 排序 | 改名 |
+|---|---|---|---|---|
+| `settings.section` | 「设置」对话框左侧导航里的分区 | ✅ | ✅ | ✅ |
+| `sidebar.panellist` | 左侧栏的面板图标按钮 | ✅ | ✅ | ✅ |
+| `sidebar.footer.action` | 左侧栏底部、Settings 旁边的动作 | ✅ | ✅ | ❌ |
 
-## 原理：拦截槽位注册
+**`sidebar.footer.action` 为什么不能改名**：该槽位的注册项**不声明 `label`**，按钮文案由组件自己通过 locale 取，渲染器也从不读 `options.label`。改名在那里不会有任何可见效果，所以 UI **不提供**该按钮（而非提供后失效）。
 
-全局设置的导航与内容都来自客户端槽位系统：每个插件通过
-`ctx.slots.inject('settings.section', () => ctx.slots.register({ name, id, order, label }, Comp))` 注册分区。
-本插件在 `SlotRegistry.prototype` 上打三个补丁（cordis 服务代理每次访问都动态取方法、不缓存，因此对所有插件立即生效）：
+**两个入口，同一个面板**：
+
+| 入口 | 位置 |
+|---|---|
+| 「设置编排」 | 设置对话框左侧导航里的一个分区（排在顶部附近，**不可隐藏**） |
+| 左侧栏「插件」页 → 本插件详情页 | 与 `dsh-mnemon`、`dsh-context` 的配置区同一位置（`plugins.bundle.config`，keyed by 包名） |
+
+面板按组渲染：
+
+```text
+┌─ 设置页 ─────────────────────────────┐
+│  设置分区      5 项      [重置本槽位] │
+├─ 左侧边栏 ───────────────────────────┤
+│  面板按钮      1 项      [重置本槽位] │
+│  栏底动作      1 项      [重置本槽位] │
+└──────────────────────────────────────┘
+```
+
+## 原理：三个补丁 + 两条读路径
+
+引擎在 `SlotRegistry.prototype` 上打三个补丁，覆盖所有注册与读取路径（cordis 服务代理每次访问都动态取方法、不缓存，因此对所有插件立即生效）：
 
 | 补丁 | 拦截点 | 作用 |
 |---|---|---|
-| `register` | 注册入口 | 每个 `settings.section` 注册都**经过**管理插件（记录库存；不落盘修改，保证 reset 永远能恢复原始值） |
-| `entries` | 外壳导航读取 | 过滤隐藏分区 + 读时改写 order/label —— **覆盖所有分区，与注册时序无关**（含先于本插件注册的 base 分区） |
-| `entriesOfSlot` | 内容选举读取 | 过滤隐藏分区（只过滤不克隆，满足渲染器 `isLive` 检查） |
+| `register` | 注册入口 | 记录**原值**（order / label / registrant）。这里不改写，保证 reset 永远能还原 |
+| `entries` | 列表读取方（设置外壳的导航） | 过滤隐藏 + 读时改写 order/label（**返回克隆**，该路径没有 `isLive` 检查） |
+| `entriesOfSlot` | 内容选举方（渲染器）+ 侧边栏自己的面板列表 | 过滤隐藏 + **原地替换 `entry.options`** |
 
-策略变更后通过一次「注册+立即注销」临时条目 bump 槽位版本，外壳随即重读（无可见闪烁）。
+### 为什么 `entriesOfSlot` 必须原地替换而不是克隆
+
+渲染器对返回的 entry 做存活性检查，用**对象身份**比较：
+
+```js
+isLive(entry) {
+  for (const rec of this.records.values()) if (rec.entries.includes(entry)) return true
+  return false
+}
+```
+
+返回克隆会直接抛 `StaleAuthorizationError`。所以这里换成「保留 `entry` 身份、替换 `entry.options`」——原 `options` 对象不被就地修改，读取方看到的始终是**生效值**（有覆盖用覆盖，否则回退原值），因此 `reset` 天然还原，不需要额外的还原逻辑。
+
+### 需要捕获「补丁安装前」的注册
+
+**基础分区（通用设置/模型/插件）先于任何 profile 插件注册**，它们的注册不经过补丁。如果没有原值，原地改写会让条目卡在被覆盖的值上、`reset` 无法还原。引擎因此在**首次读取**时补记原值（此时条目仍是干净的）。
+
+### 持久化文档按槽位分组
+
+```json
+{ "version": 1, "slots": { "settings.section": { "hidden": {}, "order": {}, "labels": {} } } }
+```
+
+**分组是必须的，不是美化**：条目 id 只在单个槽位内唯一。`dsh-client-ui-plugin-manager` 用的侧边栏面板 id 就是 `plugins`，而它同时也是一个设置分区 id——扁平结构会让隐藏其中一个连带隐藏另一个。
+
+策略经 **DSH 标准 settings 命名空间**（`slots-manager`）持久化：host 半区把策略声明为**自己的插件 `Config`**，客户端经 `remote.settings` Remote RPC 读写，由 SettingsProvider 落盘（纯服务端）。
+
+> **为什么是 `Config` 而不是 `settings.register`**：现代 DSH 的 settings 服务**没有 `register`**。它按 `ns` 在 profile 的**可配置插件条目**里查：
+>
+> ```js
+> const entry = configEditor.entries().find((row) => row.options.id === ns)
+> const schema = entry?.fiber?.runtime?.Config
+> if (entry === undefined || schema === undefined) throw new Error(`No configurable plugin entry "${ns}"`)
+> ```
+>
+> 所以**命名空间 id 必须等于本插件的条目 id**（`slots-manager`，见 `cordis.patch.yml`），schema 必须是本模块导出的 `Config`，可编辑字段用 `meta.volatile` 标记 —— 这里整份文档都是 volatile，因为插件的全部配置就是这份策略。
+>
+> ⚠️ 顺带一提：`.volatile()` **只存在于 DSH 自带的 schemastery**（它给原型打了补丁），npm 上的 `@deepseek-ai/schemastery@3.18.1` 没有这个方法。`extra()` 的类型又不够宽，所以直接写 `meta.volatile` —— 三者产生的是同一个 `meta.volatile`，而 DSH 只读它。
 
 ## 安装
 
 ```bash
-# 方式一：官方 CLI（需先发布或本地路径）
-dsh plugin --profile web add dsh-settings-manager
+# 方式一：官方 CLI
+dsh plugin --profile web add dsh-slots-manager
 
 # 方式二：profile 仓库（file: 依赖）
 # package.json:
-#   "dependencies": { "dsh-settings-manager": "file:../dsh-settings-manager" }
-#   "dsh": { "profile": { "bundles": [ ..., "dsh-settings-manager" ] } }
+#   "dependencies": { "dsh-slots-manager": "file:../dsh-slots-manager" }
+#   "dsh": { "profile": { "bundles": [ ..., "dsh-slots-manager" ] } }
 pnpm install
 ```
 
 重启 `dsh web` 后生效。
 
+> ⚠️ **与 `dsh-settings-manager` 互斥**：本插件是它的替代品（同一套补丁机制，范围更大）。两个同时启用会叠加两套补丁。启用前请先移除 `dsh-settings-manager`。
+>
+> 本插件也**不读取** `dsh-settings-manager` 留下的任何数据——命名空间与文档结构都是新的，旧配置不会迁移。
+
 ## 开发 / 构建
 
 ```bash
-pnpm install        # 安装依赖（esbuild 需要 allowBuilds，见 pnpm-workspace.yaml）
+pnpm install        # 安装依赖
 pnpm typecheck      # tsc --noEmit（严格模式）
 pnpm build          # esbuild 打包 → lib/（client.js 包进 DSH __ModuleLoader__ 格式）
-pnpm test           # UT + e2e
+pnpm test           # 全部测试
 ```
 
-`lib/` 是**构建产物**（已 gitignore），由 `pnpm build` 生成；`main`/`exports` 指向 `lib/`，所以用 `file:` 依赖前需先构建。本机开发时也常直接同步构建产物到活动 profile 的 `node_modules/dsh-settings-manager`（`lib/client.js` + `src/client.js`）实现即改即生效。
+`lib/` 是**构建产物**（已 gitignore），由 `pnpm build` 生成；`main`/`exports` 指向 `lib/`，所以用 `file:` 依赖前需先构建。
 
 ## 测试
 
-三层测试，覆盖逻辑、组件交互、真实浏览器集成：
-
 ```bash
-npm run test            # UT + e2e 冒烟（node:test，含 jsdom 真实渲染组件）
-npm run test:unit       # 仅单元测试：policy / reorder / patches
-npm run test:e2e        # 仅 e2e 冒烟：jsdom 里挂载管理面板并驱动开关/排序/重置
-npm run test:playwright # 真实浏览器（本机 Edge）对运行中的 DSH GUI 做端到端
+pnpm test               # UT + e2e 冒烟（node:test）
+pnpm test:unit          # 仅单元测试
+pnpm test:e2e           # 仅 e2e 冒烟（jsdom 挂载真实组件）
+pnpm test:playwright    # 真实浏览器对接运行中的 DSH
 ```
 
-- **UT（`tests/unit/`）**：在 VM 沙箱里加载客户端 bundle（`window.__ModuleLoader__`），通过 `__test` 缝测策略存储、reorder 原语、改名/标签读写、三个槽位补丁（注册经过、读路径隐藏/重排/改名、`entriesOfSlot` 身份安全、bump 无残留、服务端 settings 持久化（mock connection）、reset/resetAll、自身分区保护）。
-- **e2e 冒烟（`tests/e2e/`）**：jsdom + react-dom 真实渲染 `ManagerSection`，驱动开关隐藏/显示、↓ 重排、全部重置、改名提交/还原，验证实时响应与策略持久化。
-- **Playwright（`tests/playwright/`）**：用本机 Microsoft Edge（`channel: 'msedge'`）连到活动 DSH GUI（`DSH_WEB_URL` 或 `DSH_PORT`，默认 `http://127.0.0.1:3080`），验证“设置编排”出现在导航顶部、面板按分区渲染、开关/排序/重置/拖拽（落点指示线出现与消失）/改名（含刷新后持久）真实生效。首启/引导对话框按 `dsh-web-profile` CI 的循环 dismiss 方式跳过。每个用例用独立浏览器上下文（localStorage 隔离），不污染你的真实 profile。
+| 层 | 覆盖 |
+|---|---|
+| `tests/unit/policy.test.mjs` | 策略存储：读写、持久化、reset/resetAll、自身分区保护、启动加载 |
+| `tests/unit/patches.test.mjs` | 三个补丁：注册经过、读路径隐藏/重排/改名、`entriesOfSlot` 身份安全、bump 无残留 |
+| `tests/unit/reorder.test.mjs` | 重排原语与重编号 |
+| `tests/unit/multi-slot.test.mjs` | **多槽位**：按槽位隔离、`entriesOfSlot` 上的隐藏/排序/改名、`isLive` 身份契约、补丁安装前注册的原值还原、**非纳管槽位逐字节不被触碰**、能力矩阵 |
+| `tests/unit/compat.test.mjs` | **上游契约自检**：纳管槽位仍是 catalog 里的 `root`/`list` 槽位、`SlotRegistry` 仍暴露三个被补丁的方法。找不到 DSH 时**跳过**（不失败）—— CI 里由 `test` job 按 `DSH_VERSION` 装一份 DSH 并指向它，所以自检在 CI 上**真实执行**；本地可 `DSH_INSTALL_DIR=… pnpm test:unit` |
+| `tests/e2e/smoke.test.mjs` | jsdom + react-dom 真实渲染面板：开关、重排、重置、改名、分组结构 |
+| `tests/playwright/` | 真实浏览器：分区在导航顶部、面板渲染、开关/排序/重置/拖拽/改名（含刷新后持久） |
+
+> **契约自检为什么重要**：引擎依赖两个它并不 import 的上游事实（三个原型方法、每个槽位是 `list`）。上游一改，插件会**静默失效**——面板里少一项，或 `installPatches` 直接放弃、整个插件什么都不做。这个测试把沉默变成红灯。
+>
+> 它也是踩过坑的：`register` 是**类体外**的原型赋值（`SlotRegistry.prototype.register = …`），而 `entries`/`entriesOfSlot` 是类成员。按源码结构搜索会误判成「没有 register」，所以探测必须针对实例原型。
+>
+> 另一处：它要探**两种 DSH 布局** —— 开发机全局安装是 `<dsh>/node_modules/@deepseek-ai/*`（嵌套），而 CI 用 `npm install --prefix` 会把整棵树**提升到同级**。只探嵌套会让它因为与契约无关的原因在 CI 上红。
+>
+> CI 里 dsh 版本**钉在 workflow 级 `env: DSH_VERSION`**（全文件唯一出现处），不用浮动的 `@alpha`：自检断言的是「这个确切的构建仍声明了所补丁的槽位」，浮动 tag 会把上游漂移变成无法解释的红灯。
 
 ## 限制与说明
 
-- **base 分区（通用设置/模型/插件）永远先于任何第三方插件注册**，注册入口抓不到它们——全部由读路径补丁覆盖，所以本插件不依赖加载顺序（读路径是主机制）。
-- 导航图标来自设置外壳的内置 id 封闭列表，本插件的分区显示通用齿轮。
-- 隐藏正在查看的分区时，内容区显示空占位，导航其余项照常可点。
-- 策略按浏览器本地保存（settings RPC 只对白名单命名空间开放，profile 插件无法自注册命名空间）。
-- 本插件自身分区（`settings-manager`）不可隐藏，保证管理入口始终可达。
+- **基础分区永远先于任何第三方插件注册**，注册入口抓不到它们——全部由读路径补丁覆盖，所以本插件不依赖加载顺序。
+- 隐藏 `sidebar.panellist` 的条目**只是隐藏入口**：它对应的主面板可能仍能通过其他方式到达（侧边栏点击本身走 `selectPanel(id)`，即 id 就是面板 key）。
+- 本插件自身分区（`slots-manager`）不可隐藏，保证管理入口始终可达；「Settings」入口位于 `sidebar.settings`（**不是** `sidebar.panellist`），所以即使隐藏了所有面板图标，也仍能进设置恢复。
+- `sidebar.footer.action` 的隐藏与插件自带的显示开关（如 `dsh-context` 的 `insightsEntry`）功能重叠：插件自带的开关是组件返回 `null`，本插件是把注册项从槽位移除。两者不冲突，本插件的价值在于**统一位置**。
+- 纳管槽位的顺序由该槽位的读取方决定，本插件通过改写 `options.order` 生效。
+- 非纳管槽位（`conversation.*`、`plugins.*`、`shell.*` 等）**逐字节不被触碰**。
 
 ## 结构
 
 ```
-src/client.ts    浏览器半区源码（TS：策略存储 + 三个补丁 + 管理面板）
-src/host.ts      宿主半区源码（TS：注册 `settings-manager` settings 命名空间，服务端持久化）
+src/slots.ts     纳管槽位表（唯一的「加一行」入口）
+src/client.ts    浏览器半区源码：策略文档 + 三个补丁 + 管理面板
+src/host.ts      宿主半区源码：导出 `Config`（= `slots-manager` settings 命名空间的 schema）
 lib/client.js    构建产物（gitignore）：esbuild 打包 + DSH __ModuleLoader__.load 包装（只依赖 react seed）
 lib/host.mjs     构建产物（gitignore）：宿主半区（ESM，import type 已擦除 → 零运行时导入）
 scripts/build.mjs  构建（node scripts/build.mjs）；typecheck 用 pnpm typecheck
 cordis.patch.yml 打包挂载声明
-tests/           单元测试（node:test）、e2e 冒烟（jsdom+react）、Playwright（Edge）
+docs/design.md   设计与上游契约依据（权威出处、风险、分期）
+tests/           单元测试（node:test）、e2e 冒烟（jsdom+react）、Playwright
 ```
-
-宿主类型 `import type { Context } from '@deepseek-ai/cordis'` 仅编译期使用，产物零官方运行时导入；`@deepseek-ai/cordis` 作为 devDependency（类型检查用），不在 peerDependencies 里。
 
 ## License
 

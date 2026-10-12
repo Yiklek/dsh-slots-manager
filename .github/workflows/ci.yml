@@ -9,6 +9,20 @@ on:
 permissions:
   contents: write
 
+# The ONE place each tool version appears — every job reads these.
+#
+# DSH is pinned rather than `@alpha`: the compat guard asserts this exact build
+# still declares the slots the plugin patches, so a floating tag would turn
+# upstream drift into an unexplained red build. Bump it here and the guard, the
+# Playwright profile and the pkg build all move together.
+#
+# pnpm is pinned because the lockfile is shared: CI and every dev machine must
+# resolve it with the same store layout. Verified that 12.11.2 accepts the
+# existing lockfile unchanged (`--frozen-lockfile` → "Lockfile is up to date").
+env:
+  DSH_VERSION: 0.2.1-alpha.2
+  PNPM_VERSION: 12.11.2
+
 jobs:
   test:
     name: Typecheck & unit/e2e tests
@@ -18,7 +32,7 @@ jobs:
 
       - uses: pnpm/action-setup@v6
         with:
-          version: 11.22.0
+          version: ${{ env.PNPM_VERSION }}
 
       - uses: actions/setup-node@v7
         with:
@@ -34,8 +48,21 @@ jobs:
       - name: Build lib/
         run: pnpm build
 
+      # tests/unit/compat.test.mjs asserts the installed DSH still exposes the
+      # three patched SlotRegistry methods and still declares each managed slot
+      # as a root-scoped list slot. It SKIPS when no DSH is found, which is the
+      # default locally — so without this step the guard would be inert on CI and
+      # a DSH upgrade could break the plugin silently.
+      # `npm --prefix` needs the directory to exist first.
+      - name: Install dsh for the compatibility guard
+        run: |
+          mkdir -p "$RUNNER_TEMP/dsh-compat"
+          npm install --no-save --prefix "$RUNNER_TEMP/dsh-compat" "@deepseek-ai/dsh@$DSH_VERSION"
+
       - name: Run unit + e2e tests
         run: pnpm test
+        env:
+          DSH_INSTALL_DIR: ${{ runner.temp }}/dsh-compat/node_modules/@deepseek-ai/dsh
 
   playwright:
     name: Playwright functional test
@@ -53,7 +80,7 @@ jobs:
 
       - uses: pnpm/action-setup@v6
         with:
-          version: 11.22.0
+          version: ${{ env.PNPM_VERSION }}
 
       - uses: actions/setup-node@v7
         with:
@@ -70,17 +97,17 @@ jobs:
 
       - name: Create profile & link this plugin (dsh auto-creates the profile)
         run: |
-          pnpm dlx @deepseek-ai/dsh@alpha plugin --profile web add "$GITHUB_WORKSPACE"
-          echo "profile ready with linked dsh-settings-manager"
+          pnpm dlx "@deepseek-ai/dsh@$DSH_VERSION" plugin --profile web add "$GITHUB_WORKSPACE"
+          echo "profile ready with linked dsh-slots-manager"
 
       - name: Verify dsh can compose the profile
         working-directory: ${{ env.DSH_HOME }}/profiles/web
-        run: pnpm dlx @deepseek-ai/dsh@alpha --profile web --dump-config > /tmp/dump.yml
+        run: pnpm dlx "@deepseek-ai/dsh@$DSH_VERSION" --profile web --dump-config > /tmp/dump.yml
 
       - name: Start dsh web server
         working-directory: ${{ env.DSH_HOME }}/profiles/web
         run: |
-          pnpm dlx @deepseek-ai/dsh@alpha --profile web --host 127.0.0.1 --port "$DSH_PORT" --no-open > /tmp/dsh-e2e.log 2>&1 &
+          pnpm dlx "@deepseek-ai/dsh@$DSH_VERSION" --profile web --host 127.0.0.1 --port "$DSH_PORT" --no-open > /tmp/dsh-e2e.log 2>&1 &
           echo "PID=$!" >> "$GITHUB_ENV"
           echo "e2e: server PID=$! port=$DSH_PORT"
           # The root gate answers 401 until the browser exchanges the boot
@@ -127,7 +154,7 @@ jobs:
 
       - uses: pnpm/action-setup@v6
         with:
-          version: 11.22.0
+          version: ${{ env.PNPM_VERSION }}
 
       - uses: actions/setup-node@v7
         with:

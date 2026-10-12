@@ -16,7 +16,7 @@ import { MockSlots } from './mock-slots.mjs'
 const BUNDLE = fileURLToPath(new URL('../../lib/client.js', import.meta.url))
 
 /** Key on the VM global where apply() stashes the test seam (TS port). */
-export const SEAM_KEY = '__DSH_SETTINGS_MANAGER_SEAM__'
+export const SEAM_KEY = '__DSH_SLOTS_MANAGER_SEAM__'
 
 /** Minimal React stub used when no real React is provided (UT only). */
 const defaultReact = {
@@ -29,7 +29,7 @@ const defaultReact = {
 }
 
 /** Fresh in-memory localStorage mock (jsdom-free). */
-export function inMemoryStorage() {
+function inMemoryStorage() {
   const store = new Map()
   return {
     _store: store,
@@ -41,19 +41,22 @@ export function inMemoryStorage() {
 
 /**
  * Fresh mock `remote` service (the DSH settings wire). The client's policy
- * persists to `remote.settings.replace('settings-manager', section)` and
- * loads from `remote.settings.describe()`. The mock stores the persisted
- * document in memory so tests can assert what got written / seed what gets read.
+ * persists to `remote.settings.replace('slots-manager', doc)` and loads from
+ * `remote.settings.describe()`. The mock stores the persisted document in
+ * memory so tests can assert what got written / seed what gets read.
+ *
+ * The document shape is `{ version, slots: { <slot>: { hidden, order, labels } } }`
+ * — keyed by slot first, because entry ids are only unique within a slot.
  */
-export function mockConnection(initial = undefined) {
-  let persisted = initial !== undefined ? initial : { hidden: {}, order: {}, labels: {} }
+function mockConnection(initial = undefined) {
+  let persisted = initial !== undefined ? initial : { version: 1, slots: {} }
   const replaceCalls = []
   return {
     settings: {
       async describe() {
         return {
           ok: true,
-          value: { writable: true, hasDocument: true, namespaces: [{ ns: 'settings-manager', value: persisted }] },
+          value: { writable: true, hasDocument: true, namespaces: [{ ns: 'slots-manager', value: persisted }] },
         }
       },
       async replace(ns, section, expectedRevision) {
@@ -100,7 +103,7 @@ export function loadEnv({ globals = {}, react, locale, resolveSpecifier } = {}) 
     String,
     Error,
     Math,
-    __DSH_SETTINGS_MANAGER_TEST__: true,
+    __DSH_SLOTS_MANAGER_TEST__: true,
     localStorage: inMemoryStorage(),
     ...globals,
   }
@@ -110,7 +113,7 @@ export function loadEnv({ globals = {}, react, locale, resolveSpecifier } = {}) 
 
   const registration = registrations[0]
   if (!registration) throw new Error('client bundle did not register a module')
-  if (registration.id !== 'dsh-settings-manager') {
+  if (registration.id !== 'dsh-slots-manager') {
     throw new Error(`unexpected module id "${registration.id}"`)
   }
 

@@ -52,7 +52,7 @@ function setup() {
 
 async function mount() {
   const { env, slots, test } = setup()
-  const entry = slots.entries('settings.section').find((e) => e.options.id === 'settings-manager')
+  const entry = slots.entries('settings.section').find((e) => e.options.id === 'slots-manager')
   assert.ok(entry, 'manager section should be registered')
   const root = createRoot(dom.window.document.getElementById('root'))
   await act(async () => {
@@ -202,6 +202,76 @@ test('e2e: renaming a section updates the nav and the panel label', async () => 
     await act(async () => resetBtn.click())
     await flush()
     assert.equal(navLabel('models'), '模型')
+  } finally {
+    root.unmount()
+  }
+})
+
+/**
+ * The grouped panel: one heading per group, one `data-slot` section per managed
+ * slot, and the sidebar slots driven through the same controls. This is the
+ * render-level counterpart to the multi-slot unit tests.
+ */
+test('e2e: renders a group per slot and drives the sidebar slots', async () => {
+  const env = loadEnv({
+    globals: { document: dom.window.document, localStorage: dom.window.localStorage },
+    react: React,
+  })
+  const { slots, plugin, ctx } = env
+
+  slots.declare('settings.section')
+  slots.declare('sidebar.panellist')
+  slots.declare('sidebar.footer.action')
+  slots.register({ name: 'settings.section', id: 'general', order: 0, label: () => '通用设置' }, () => 'General')
+  slots.register({ name: 'sidebar.panellist', id: 'plugins', order: 10, label: () => '插件面板' }, () => 'Panel')
+  // Footer actions declare no label — the real shape.
+  slots.register({ name: 'sidebar.footer.action', id: 'context-overview', order: 10 }, () => 'Button')
+  plugin.apply(ctx)
+
+  const entry = slots.entries('settings.section').find((e) => e.options.id === 'slots-manager')
+  assert.ok(entry, 'manager section registered')
+  const root = createRoot(dom.window.document.getElementById('root'))
+  await act(async () => {
+    root.render(React.createElement(entry.component))
+  })
+  await flush()
+
+  try {
+    const panel = dialog()
+    const sections = [...panel.querySelectorAll('[data-slot]')].map((el) => el.getAttribute('data-slot'))
+    assert.deepEqual(sections, ['settings.section', 'sidebar.panellist', 'sidebar.footer.action'])
+    assert.deepEqual(
+      [...panel.querySelectorAll('h3')].map((el) => el.textContent),
+      ['设置页', '左侧边栏'],
+    )
+
+    const listOf = (slot) => [...panel.querySelectorAll(`[data-slot="${slot}"] li`)]
+    const titlesOf = (row) => [...row.querySelectorAll('.dsm-icon-btn')].map((b) => b.getAttribute('title'))
+
+    // A panel button carries the full cluster, including rename.
+    const panelRow = listOf('sidebar.panellist')[0]
+    assert.ok(panelRow, 'panel button row rendered')
+    assert.ok(titlesOf(panelRow).includes('改名'), 'panel button is renameable')
+
+    // A footer action has no label to project, so rename is not offered at all.
+    const footerRow = listOf('sidebar.footer.action')[0]
+    assert.ok(footerRow, 'footer action row rendered')
+    assert.ok(!titlesOf(footerRow).includes('改名'), 'footer action offers no rename')
+
+    // Hide the panel button through the UI → it leaves the sidebar read path.
+    const sw = panelRow.querySelector('[role="switch"]')
+    await act(async () => sw.click())
+    await flush()
+    // Array.from re-homes the sandbox array into this realm for comparison.
+    assert.deepEqual(
+      Array.from(slots.entriesOfSlot('sidebar.panellist').map((e) => e.options.id)),
+      [],
+      'hidden panel button leaves entriesOfSlot',
+    )
+    assert.ok(
+      slots.entries('settings.section').some((e) => e.options.id === 'general'),
+      'the settings slot is unaffected',
+    )
   } finally {
     root.unmount()
   }

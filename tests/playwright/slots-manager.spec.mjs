@@ -1,46 +1,5 @@
-/**
- * Playwright e2e — against a live DSH web instance (Edge).
- * Verifies the plugin is actually loaded: the "设置编排" section is present
- * near the top of the Settings nav, its panel renders one row per section,
- * toggling a switch removes/restores a section from the nav, and reorder /
- * reset-all work live.
- *
- * The manager section is forced to order 1 (near the top) so the nav never
- * needs scrolling to reach it.
- */
 import { test, expect } from '@playwright/test'
-import { readFileSync } from 'node:fs'
-
-// First-run / onboarding dialogs can appear in a fresh context. Dismiss them
-// the same way the dsh-web-profile CI smoke does: repeatedly dismiss whatever
-// modal is present (click the [aria-hidden] mask, tap known dismiss buttons),
-// then retry opening Settings until it succeeds.
-const DISMISS_LABELS = ['继续', '稍后配置', '知道了', '关闭此提示']
-
-/**
- * Resolve the dsh connection URL to establish the browser session before the
- * test navigates. dsh boot prints a token-bearing root URL
- * (`http://host:port/?token=...`); visiting it exchanges the token for an
- * authority-bound cookie and redirects to the clean root. The URL comes from
- * `DSH_TOKEN_URL` when the caller knows it directly; otherwise it is parsed
- * from the dsh boot log (`DSH_BOOT_LOG`, defaulting to the CI path). Returns
- * `undefined` when no token URL is available (deployments without the root
- * gate), in which case the test navigates straight to "/".
- */
-function tokenUrl() {
-  if (process.env.DSH_TOKEN_URL && process.env.DSH_TOKEN_URL.trim() !== '') {
-    return process.env.DSH_TOKEN_URL.trim()
-  }
-  const logPath = process.env.DSH_BOOT_LOG || '/tmp/dsh-e2e.log'
-  let log
-  try {
-    log = readFileSync(logPath, 'utf8')
-  } catch {
-    return undefined
-  }
-  const match = log.match(/https?:\/\/[^\s]+[?&]token=[A-Za-z0-9_-]+/)
-  return match ? match[0] : undefined
-}
+import { DISMISS_LABELS, dismissOnboarding, openSection, openSettings, tokenUrl } from './harness.mjs'
 
 test.beforeEach(async ({ page }) => {
   const url = tokenUrl()
@@ -48,37 +7,6 @@ test.beforeEach(async ({ page }) => {
     await page.goto(url, { waitUntil: 'commit', timeout: 30_000 })
   }
 })
-
-async function openSettings(page) {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    // Dismiss any onboarding overlay by clicking the masked backdrop.
-    const modal = page.locator('[role="presentation"]').first()
-    if ((await modal.count()) > 0) {
-      const mask = modal.locator('[aria-hidden="true"]').first()
-      if ((await mask.count()) > 0) {
-        await mask.click({ position: { x: 5, y: 5 } }).catch(() => {})
-      }
-      await page.waitForTimeout(250)
-    }
-
-    // Dismiss known first-run prompt buttons.
-    for (const name of DISMISS_LABELS) {
-      const dismiss = page.getByRole('button', { name, exact: true })
-      if ((await dismiss.count()) > 0) {
-        await dismiss.click().catch(() => {})
-        await expect(dismiss).not.toBeVisible({ timeout: 2000 }).catch(() => {})
-      }
-    }
-
-    try {
-      await page.getByRole('button', { name: '设置', exact: true }).first().click({ timeout: 3000 })
-      return true
-    } catch {
-      // A modal probably mounted just in time; loop and dismiss it again.
-    }
-  }
-  return false
-}
 
 test('设置编排 is present near the top of the Settings nav', async ({ page }) => {
   await page.goto('/')
@@ -95,10 +23,10 @@ test('manager panel renders a row per section with a switch, and toggling hides/
   expect(await openSettings(page), 'settings should open after dismissing first-run dialogs').toBe(true)
 
   const nav = page.locator('[role="dialog"] nav')
-  await nav.getByRole('button', { name: '设置编排' }).click()
+  expect(await openSection(page, '设置编排'), 'settings nav section reachable').toBe(true)
 
   const dialog = page.locator('[role="dialog"]')
-  const rows = dialog.locator('li')
+  const rows = dialog.locator('[data-slot="settings.section"] li')
   const count = await rows.count()
   // Base DSH profiles render 通用设置/设置编排/模型/插件… — assert a healthy
   // minimum rather than a specific plugin count so the test is profile-agnostic.
@@ -121,9 +49,9 @@ test('drag & drop moves a section and clears the drop highlight', async ({ page 
   expect(await openSettings(page), 'settings should open after dismissing first-run dialogs').toBe(true)
 
   const nav = page.locator('[role="dialog"] nav')
-  await nav.getByRole('button', { name: '设置编排' }).click()
+  expect(await openSection(page, '设置编排'), 'settings nav section reachable').toBe(true)
   const dialog = page.locator('[role="dialog"]')
-  const rows = dialog.locator('li')
+  const rows = dialog.locator('[data-slot="settings.section"] li')
 
   const orderOf = async (label) => {
     const texts = await nav.getByRole('button').allTextContents()
@@ -131,13 +59,20 @@ test('drag & drop moves a section and clears the drop highlight', async ({ page 
   }
   const before = await orderOf('设置编排')
 
-  // Drag "设置编排" (near the top) down onto the LAST row — guaranteed
-  // non-adjacent on any profile with ≥3 rows, so either a before/after
-  // placement moves it (a drop at the exact middle of an adjacent target
-  // computes 'before', a no-op). Index-based targeting keeps the test
-  // profile-agnostic.
+  // Drag "设置编排" (near the top) down onto a row a few places below.
+  //
+  // Two constraints pin the target. It must be far enough that either
+  // placement moves the row — a drop at the exact middle of the ADJACENT row
+  // computes 'before', a no-op — and close enough that the synthetic pointer
+  // travel stays short. A full-panel drag (top row to the bottom row, ~560px
+  // over a scrollable panel) loses the HTML5 drag partway: the browser stops
+  // emitting `dragover` and the indicator never appears. That is a limitation
+  // of driving native drag-and-drop with synthetic mouse events, not of the
+  // component — short and mid-range drags, INCLUDING ones ending on the very
+  // same bottom row, work.
+  const count = await rows.count()
   const src = rows.filter({ hasText: '设置编排' }).first()
-  const dst = rows.nth((await rows.count()) - 1)
+  const dst = rows.nth(Math.min(count - 1, 3))
   await src.scrollIntoViewIfNeeded()
   await dst.scrollIntoViewIfNeeded()
   const a = await src.boundingBox()
@@ -167,9 +102,9 @@ test('reset-all restores the original nav order after a reorder', async ({ page 
   expect(await openSettings(page), 'settings should open after dismissing first-run dialogs').toBe(true)
 
   const nav = page.locator('[role="dialog"] nav')
-  await nav.getByRole('button', { name: '设置编排' }).click()
+  expect(await openSection(page, '设置编排'), 'settings nav section reachable').toBe(true)
   const dialog = page.locator('[role="dialog"]')
-  const rows = dialog.locator('li')
+  const rows = dialog.locator('[data-slot="settings.section"] li')
 
   const orderOf = async (label) => {
     const texts = await nav.getByRole('button').allTextContents()
@@ -193,14 +128,14 @@ test('rename changes the section name in the nav and persists across reload', as
   expect(await openSettings(page), 'settings should open after dismissing first-run dialogs').toBe(true)
 
   const nav = page.locator('[role="dialog"] nav')
-  await nav.getByRole('button', { name: '设置编排' }).click()
+  expect(await openSection(page, '设置编排'), 'settings nav section reachable').toBe(true)
   const dialog = page.locator('[role="dialog"]')
-  const rows = dialog.locator('li')
+  const rows = dialog.locator('[data-slot="settings.section"] li')
 
   // Open the rename editor on the "模型" row (id `models`, shown in the meta
   // line) via the pencil icon. The plain hasText filter would also match
   // 模型能力与档位, so anchor on the unique id.
-  const modelRow = dialog.locator('li').filter({ hasText: 'models' })
+  const modelRow = dialog.locator('[data-slot="settings.section"] li').filter({ hasText: 'models' })
   await modelRow.getByRole('button', { name: '改名' }).click()
   const input = dialog.locator('.dsm-rename-input')
   await expect(input).toBeVisible()
@@ -218,8 +153,8 @@ test('rename changes the section name in the nav and persists across reload', as
   await expect(nav.getByRole('button', { name: renamed })).toBeVisible()
 
   // Restore: reset the row reverts the name.
-  await nav.getByRole('button', { name: '设置编排' }).click()
-  const renamedRow = dialog.locator('li').filter({ hasText: renamed })
+  expect(await openSection(page, '设置编排'), 'settings nav section reachable').toBe(true)
+  const renamedRow = dialog.locator('[data-slot="settings.section"] li').filter({ hasText: renamed })
   await renamedRow.getByRole('button', { name: '重置' }).click()
   await expect(nav.getByRole('button', { name: renamed })).toHaveCount(0)
   await expect(nav.getByRole('button', { name: '模型', exact: true })).toBeVisible()

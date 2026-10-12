@@ -1,7 +1,7 @@
 {
-  "name": "dsh-settings-manager",
+  "name": "dsh-slots-manager",
   "version": "0.1.0",
-  "description": "DSH web plugin: manage how other plugins' sections appear in the global Settings dialog — show/hide, reorder, rename — without touching upstream. Every settings.section registration passes through the manager policy (registration-time + read-path interception).",
+  "description": "DSH web plugin: arrange the list slots other plugins contribute to \u2014 show/hide, reorder, rename \u2014 without touching upstream. Ships a slot-agnostic engine (three SlotRegistry.prototype patches) driven by a small managed-slot table; today it manages settings.section, sidebar.panellist and sidebar.footer.action.",
   "type": "module",
   "main": "./lib/host.mjs",
   "exports": {
@@ -28,7 +28,6 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-settings": "^0.1.2-alpha.3",
     "@deepseek-ai/schemastery": "^3.18.1",
     "@playwright/test": "1.63.0-alpha-2026-08-05",
     "@types/react": "^18.3.0",
@@ -54,14 +53,10 @@
   },
   "peerDependencies": {
     "react": "*",
-    "@deepseek-ai/dsh-settings": "*",
     "@deepseek-ai/schemastery": "*"
   },
   "peerDependenciesMeta": {
     "react": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-settings": {
       "optional": true
     },
     "@deepseek-ai/schemastery": {
@@ -72,13 +67,10 @@
     "deepseek-harness",
     "dsh",
     "plugin",
+    "slots",
     "settings",
-    "slots"
+    "sidebar",
+    "arrange"
   ],
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild"
-    ]
-  },
   "license": "MIT"
 }

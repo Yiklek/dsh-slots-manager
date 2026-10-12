@@ -1,26 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { readFileSync } from 'node:fs'
-
-const DISMISS_LABELS = ['继续', '稍后配置', '知道了', '关闭此提示']
-
-/**
- * Resolve the dsh connection URL to establish the browser session (same
- * approach as settings-manager.spec.mjs — see its tokenUrl docs).
- */
-function tokenUrl() {
-  if (process.env.DSH_TOKEN_URL && process.env.DSH_TOKEN_URL.trim() !== '') {
-    return process.env.DSH_TOKEN_URL.trim()
-  }
-  const logPath = process.env.DSH_BOOT_LOG || '/tmp/dsh-e2e.log'
-  let log
-  try {
-    log = readFileSync(logPath, 'utf8')
-  } catch {
-    return undefined
-  }
-  const match = log.match(/https?:\/\/[^\s]+[?&]token=[A-Za-z0-9_-]+/)
-  return match ? match[0] : undefined
-}
+import { DISMISS_LABELS, dismissOnboarding, openSection, openSettings, tokenUrl } from './harness.mjs'
 
 test.beforeEach(async ({ page }) => {
   const url = tokenUrl()
@@ -29,38 +8,13 @@ test.beforeEach(async ({ page }) => {
   }
 })
 
-async function openSettings(page) {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const modal = page.locator('[role="presentation"]').first()
-    if ((await modal.count()) > 0) {
-      const mask = modal.locator('[aria-hidden="true"]').first()
-      if ((await mask.count()) > 0) await mask.click({ position: { x: 5, y: 5 } }).catch(() => {})
-      await page.waitForTimeout(250)
-    }
-    for (const name of DISMISS_LABELS) {
-      const dismiss = page.getByRole('button', { name, exact: true })
-      if ((await dismiss.count()) > 0) {
-        await dismiss.click().catch(() => {})
-        await expect(dismiss).not.toBeVisible({ timeout: 2000 }).catch(() => {})
-      }
-    }
-    try {
-      await page.getByRole('button', { name: '设置', exact: true }).first().click({ timeout: 3000 })
-      return true
-    } catch {
-      /* retry */
-    }
-  }
-  return false
-}
-
 test('insertion indicator persists across the row gap (no blink)', async ({ page }) => {
   await page.goto('/')
   expect(await openSettings(page), 'settings should open after dismissing first-run dialogs').toBe(true)
   const nav = page.locator('[role="dialog"] nav')
-  await nav.getByRole('button', { name: '设置编排' }).click()
+  expect(await openSection(page, '设置编排'), 'settings nav section reachable').toBe(true)
   const dialog = page.locator('[role="dialog"]')
-  const rows = dialog.locator('li')
+  const rows = dialog.locator('[data-slot="settings.section"] li')
   await rows.first().waitFor({ state: 'visible' })
 
   const indicator = dialog.locator('.dsm-drop-indicator')

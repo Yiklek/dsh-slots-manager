@@ -1,17 +1,22 @@
-# dsh-settings-manager bundle patch
+# dsh-slots-manager bundle patch
 #
 # Mount anchor for the host half. The real work happens in the browser half
-# (src/client.js): it patches the client slot registry so every
-# `settings.section` registration flows through the manager policy, and
-# contributes its own "Settings Manager" section to the global Settings
-# dialog. The host half intentionally keeps no state.
+# (src/client.ts): it patches the client slot registry so every registration
+# into a managed slot (see src/slots.ts) flows through the manager policy, and
+# contributes the manager panel behind two doors — a section in the global
+# Settings dialog, and this bundle's own page in the sidebar Plugins list.
+#
+# The host half exports a volatile `Config`; the settings service reads it off
+# this entry and exposes it as the `slots-manager` namespace. That is why the
+# entry id below must stay equal to the namespace the browser half writes to
+# (SECTION_NS in src/client.ts) — the id IS the namespace.
 #
 # Install with the official CLI:
 #
-#   dsh plugin --profile <name> add dsh-settings-manager
+#   dsh plugin --profile <name> add dsh-slots-manager
 #
 # (or add a file: dependency in the profile package.json and append the
 # bundle to dsh.profile.bundles).
 - insert:
-    - id: settings-manager
-      name: 'dsh-settings-manager'
+    - id: slots-manager
+      name: 'dsh-slots-manager'

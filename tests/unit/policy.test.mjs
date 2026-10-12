@@ -27,7 +27,7 @@ test('effectiveOrder falls back to the registered order', () => {
 test('setHidden/setOrder/setLabel persist to the server settings namespace', () => {
   const { test, connection } = fresh()
   test.policy.setHidden('api-retry', true)
-  test.policy.setOrder('web-ui', 7)
+  test.policy.setOrders({ 'web-ui': 7 })
   test.policy.setLabel('models', 'Model List')
 
   assert.equal(test.policy.isHidden('api-retry'), true)
@@ -35,11 +35,13 @@ test('setHidden/setOrder/setLabel persist to the server settings namespace', () 
   assert.equal(test.policy.labelFor('models'), 'Model List')
 
   const persisted = connection._persisted()
-  assert.equal(persisted.hidden['api-retry'], true)
-  assert.equal(persisted.order['web-ui'], 7)
-  assert.equal(persisted.labels['models'], 'Model List')
+  // The document is keyed by SLOT first (ids are only unique within a slot).
+  const section = persisted.slots['settings.section']
+  assert.equal(section.hidden['api-retry'], true)
+  assert.equal(section.order['web-ui'], 7)
+  assert.equal(section.labels['models'], 'Model List')
   // every mutation fired one server replace against the manager namespace
-  assert.ok(connection._replaceCalls().every((call) => call.ns === 'settings-manager'))
+  assert.ok(connection._replaceCalls().every((call) => call.ns === 'slots-manager'))
 })
 
 test('hidden/show toggle round-trips', () => {
@@ -52,14 +54,14 @@ test('hidden/show toggle round-trips', () => {
 
 test('own section can never be hidden', () => {
   const { test } = fresh()
-  test.policy.setHidden('settings-manager', true)
-  assert.equal(test.policy.isHidden('settings-manager'), false)
+  test.policy.setHidden('slots-manager', true)
+  assert.equal(test.policy.isHidden('slots-manager'), false)
 })
 
 test('reset clears only one section', () => {
   const { test } = fresh()
   test.policy.setHidden('api-retry', true)
-  test.policy.setOrder('api-retry', 50)
+  test.policy.setOrders({ 'api-retry': 50 })
   test.policy.setHidden('models', true)
   test.policy.reset('api-retry')
   assert.equal(test.policy.isHidden('api-retry'), false)
@@ -71,18 +73,20 @@ test('reset clears only one section', () => {
 test('resetAll clears everything', () => {
   const { test, connection } = fresh()
   test.policy.setHidden('api-retry', true)
-  test.policy.setOrder('models', 3)
+  test.policy.setOrders({ 'models': 3 })
   test.policy.setLabel('general', 'Renamed')
   test.policy.resetAll()
   const persisted = connection._persisted()
-  assert.deepEqual(persisted.hidden, {})
-  assert.deepEqual(persisted.order, {})
-  assert.deepEqual(persisted.labels, {})
+  // The slot key itself is dropped, so a fresh document carries no empty slice.
+  assert.deepEqual(persisted.slots['settings.section'], undefined)
 })
 
 test('load populates the policy from a server document', () => {
   const { test } = fresh()
-  test.policy.load({ hidden: { 'api-retry': true }, order: { 'web-ui': 7 }, labels: { models: 'X' } })
+  test.store.load({
+    version: 1,
+    slots: { 'settings.section': { hidden: { 'api-retry': true }, order: { 'web-ui': 7 }, labels: { models: 'X' } } },
+  })
   assert.equal(test.policy.isHidden('api-retry'), true)
   assert.equal(test.policy.orderFor('web-ui'), 7)
   assert.equal(test.policy.labelFor('models'), 'X')
@@ -93,26 +97,8 @@ test('a late server load is ignored after a user mutation', () => {
   test.policy.setHidden('api-retry', true)
   // Simulate apply()'s async describe resolving AFTER the user acted: it must
   // not clobber the fresher in-memory change.
-  test.policy.load({ hidden: {}, order: {}, labels: {} })
+  test.store.load({ version: 1, slots: {} })
   assert.equal(test.policy.isHidden('api-retry'), true)
-})
-
-test('applyToRead returns the same object when no policy applies', () => {
-  const { test } = fresh()
-  const options = { id: 'api-retry', order: 95 }
-  assert.equal(test.policy.applyToRead(options), options)
-})
-
-test('applyToRead rewrites order and label when policy applies', () => {
-  const { test, raw } = fresh()
-  test.policy.setOrder('api-retry', 5)
-  test.policy.setLabel('api-retry', '接管后')
-  const rewritten = test.policy.applyToRead({ id: 'api-retry', order: 95 })
-  assert.equal(rewritten.order, 5)
-  assert.equal(typeof rewritten.label, 'function')
-  assert.equal(rewritten.label(), '接管后')
-  // original object untouched
-  assert.equal(raw('api-retry').options.order, 95)
 })
 
 test('setLabel with an empty/whitespace string clears the override', () => {
@@ -156,7 +142,10 @@ test('startup loads the persisted policy from settings.describe', async () => {
   slots.register({ name: 'settings.section', id: 'api-retry', order: 95, label: () => 'API 重试' }, () => {})
   slots.register({ name: 'settings.section', id: 'models', order: 10, label: () => '模型' }, () => {})
   // Seed the server document BEFORE apply, so the async describe load picks it up.
-  connection._setPersisted({ hidden: { 'api-retry': true }, order: { models: 30 }, labels: { models: '接管' } })
+  connection._setPersisted({
+    version: 1,
+    slots: { 'settings.section': { hidden: { 'api-retry': true }, order: { models: 30 }, labels: { models: '接管' } } },
+  })
   plugin.apply(ctx)
   await new Promise((resolve) => setTimeout(resolve, 0))
   const test = env.vmGlobal[SEAM_KEY]
@@ -170,7 +159,10 @@ test('startup load does not overwrite a user mutation made before describe resol
   const { slots, plugin, ctx, connection } = env
   slots.declare('settings.section')
   slots.register({ name: 'settings.section', id: 'api-retry', order: 95, label: () => 'API 重试' }, () => {})
-  connection._setPersisted({ hidden: { 'api-retry': true }, order: {}, labels: {} })
+  connection._setPersisted({
+    version: 1,
+    slots: { 'settings.section': { hidden: { 'api-retry': true }, order: {}, labels: {} } },
+  })
   plugin.apply(ctx)
   const test = env.vmGlobal[SEAM_KEY]
   // user toggles before the async describe resolves

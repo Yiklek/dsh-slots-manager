@@ -15,7 +15,7 @@ function fresh() {
 
 test('register hook records inventory but never mutates stored options', () => {
   const { test, slots, raw } = fresh()
-  test.policy.setOrder('late-plugin', 7)
+  test.policy.setOrders({ 'late-plugin': 7 })
   slots.register({ name: 'settings.section', id: 'late-plugin', order: 999, label: () => 'Late' }, () => 'Late')
   // stored stays 999 (read path is the sole policy authority)
   assert.equal(raw('late-plugin').options.order, 999)
@@ -35,7 +35,7 @@ test('entries() filters hidden sections', () => {
 
 test('entries() rewrites order and label on read', () => {
   const { test, slots } = fresh()
-  test.policy.setOrder('web-ui', 5)
+  test.policy.setOrders({ 'web-ui': 5 })
   test.policy.setLabel('api-retry', '接管后')
   const webUi = slots.entries('settings.section').find((e) => e.options.id === 'web-ui')
   assert.equal(webUi.options.order, 5)
@@ -55,8 +55,8 @@ test('entriesOfSlot() filters hidden but returns the original entry object (isLi
 
 test('nav order follows rewritten orders (shell-style sort)', () => {
   const { test, navIds } = fresh()
-  test.policy.setOrder('web-ui', 5)
-  assert.deepEqual(navIds(), ['general', 'settings-manager', 'web-ui', 'models', 'api-retry'])
+  test.policy.setOrders({ 'web-ui': 5 })
+  assert.deepEqual(navIds(), ['general', 'slots-manager', 'web-ui', 'models', 'api-retry'])
 })
 
 test('bump raises the slot version and leaves no trace', () => {
@@ -65,15 +65,15 @@ test('bump raises the slot version and leaves no trace', () => {
   test.patch.bump()
   assert.ok(slots.getVersion('settings.section') > before)
   const ids = slots.entries('settings.section').map((e) => e.options.id)
-  assert.ok(!ids.includes('settings-manager-touch'))
+  assert.ok(!ids.includes('slots-manager-touch'))
 })
 
 test('the manager registers its own unhideable section near the top', () => {
   const { navIds } = fresh()
   const ids = navIds()
-  assert.ok(ids.includes('settings-manager'))
+  assert.ok(ids.includes('slots-manager'))
   // order 1 → second slot
-  assert.equal(ids[1], 'settings-manager')
+  assert.equal(ids[1], 'slots-manager')
 })
 
 test('hidden section is restored live by un-hiding', () => {

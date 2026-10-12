@@ -6,7 +6,7 @@
  * The prototype methods are exactly what the plugin's patches wrap, so the
  * service must be a real class instance (like the real SlotRegistry).
  */
-export const EMPTY = Object.freeze([])
+const EMPTY = Object.freeze([])
 
 export class MockSlots {
   constructor() {

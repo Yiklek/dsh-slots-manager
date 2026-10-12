@@ -1,5 +1,5 @@
 /**
- * Build dsh-settings-manager.
+ * Build dsh-slots-manager.
  *
  *   node scripts/build.mjs
  *
@@ -37,7 +37,7 @@ const client = await build({
 
 const bundled = client.outputFiles[0].text
 const wrapped = `window.__ModuleLoader__.load({
-  id: 'dsh-settings-manager',
+  id: 'dsh-slots-manager',
   factory: (require) => {
     'use strict'
     var module = { exports: {} }

@@ -1,36 +1,43 @@
 /**
- * dsh-settings-manager — browser half, TypeScript source.
+ * dsh-slots-manager — browser half, TypeScript source.
  *
- * Manages how other plugins' sections appear in the global Settings dialog
- * (show/hide, ordering, renaming) WITHOUT modifying upstream. Works by
- * intercepting the client slot registry (`ctx.slots`), the one mechanism every
- * plugin uses to contribute a settings section:
+ * Arranges how other plugins' contributions appear in a set of list slots
+ * (show/hide, ordering, renaming) WITHOUT modifying upstream. The slots are
+ * named in `src/slots.ts`; the engine here is slot-agnostic.
  *
- *   ctx.slots.inject('settings.section', () => ctx.slots.register({...}, Comp))
+ * Works by intercepting the client slot registry (`ctx.slots`), the one
+ * mechanism every plugin uses to contribute to a slot:
+ *
+ *   ctx.slots.inject(<key>, () => ctx.slots.register({...}, Comp))
  *
  * Three interception points (all on `SlotRegistry.prototype`, which every
  * `ctx.slots.*` call resolves through dynamically — the cordis service proxy
  * re-reads property descriptors at access time, no caching):
  *
- *   1. register  — every `settings.section` registration PASSES THROUGH the
- *                  manager (inventory recorded). The stored registration is
- *                  NOT mutated: the read path is the single policy authority,
- *                  so reset() can always restore a plugin's own values (a
- *                  registration-time rewrite would destroy the original after
- *                  a page reload). Hard drop / redirect hooks live here.
- *   2. entries   — the Settings shell builds its nav from raw
- *                  `slots.entries('settings.section')`; this patch filters
- *                  hidden sections and rewrites order/label on read. Covers
- *                  EVERY section regardless of when it registered (the shell
- *                  re-reads on every slot version change), including the base
- *                  sections (General/Models/Plugins) that always register
- *                  before any profile plugin.
- *   3. entriesOfSlot — the renderer elects the winning entry per id for the
- *                  section CONTENT; this patch filters hidden ids there too
- *                  (filter-only: the renderer runs an `isLive` check on the
- *                  returned entries, so clones would throw).
+ *   1. register  — every managed-slot registration PASSES THROUGH the manager
+ *                  (inventory + the ORIGINAL values recorded, so reset() can
+ *                  always restore them). The options object is never mutated
+ *                  here.
+ *   2. entries   — readers that build a list from `slots.entries(key)` (the
+ *                  Settings shell's nav) get hidden entries filtered out and
+ *                  order/label rewritten. Returns CLONES, which is fine on this
+ *                  path. Covers every entry regardless of when it registered,
+ *                  including base sections that register before any profile
+ *                  plugin.
+ *   3. entriesOfSlot — readers that render the elected entry per id (the
+ *                  renderer's `renderSlot`, and the sidebar's own panel list).
+ *                  Hidden entries are filtered AND the surviving entry's
+ *                  `options` is REPLACED IN PLACE — the entry object itself
+ *                  keeps its identity, because the renderer runs an `isLive`
+ *                  check that compares entries by identity
+ *                  (`rec.entries.includes(entry)`), so a clone would throw
+ *                  StaleAuthorizationError. Rewriting `options` is what makes
+ *                  ordering and renaming reach the sidebar, which reads
+ *                  `options.order` / `options.label` straight off this path.
  *
- * After a policy change the shell must re-read: a dummy register+dispose
+ * Non-managed slots are returned byte-for-byte untouched by every patch.
+ *
+ * After a policy change the readers must re-read: a dummy register+dispose
  * bumps the slot version and fires the listeners (no visible flash — the
  * flush runs on a microtask after both mutations).
  *
@@ -43,20 +50,28 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import React from 'react'
+import {
+  MANAGED_KEYS,
+  MANAGED_SLOTS,
+  SECTION_SLOT,
+  SLOT_GROUPS,
+  hintKeyFor,
+  navKeyFor,
+  type SlotDescriptor,
+} from './slots'
 
 /* ------------------------------------------------------------------ *
  * Constants
  * ------------------------------------------------------------------ */
 
-/** The settings-section slot this plugin manages. */
-const SECTION_SLOT = 'settings.section'
-/** This plugin's own section id (never hidden, so its UI stays reachable). */
-const OWN_ID = 'settings-manager'
+/** This plugin's own section id in `settings.section` (never hidden, so its
+ *  own UI always stays reachable). */
+const OWN_ID = 'slots-manager'
 /** The server-side settings namespace (registered by the host half) that
  *  persists the manager policy document. */
-const SECTION_NS = 'settings-manager'
+const SECTION_NS = 'slots-manager'
 /** Locale dictionary namespace. */
-const LOCALE_NS = 'settingsManager'
+const LOCALE_NS = 'slotsManager'
 /**
  * Default nav order for this plugin's own section. Kept near the TOP: the
  * settings nav does not scroll by default and gets clipped once many sections
@@ -64,14 +79,51 @@ const LOCALE_NS = 'settingsManager'
  */
 const OWN_ORDER = 1
 /** Dummy entry id used to bump the slot version after policy changes. */
-const TOUCH_ID = 'settings-manager-touch'
+const TOUCH_ID = 'slots-manager-touch'
 
-/** The client-side settings document (persisted in localStorage). */
-interface PolicyDoc {
+/**
+ * "A bundle's own configuration, keyed by the bundle's package name and rendered
+ * on the bundle's page between its description and its rows."
+ *
+ * This is THE seat the sidebar Plugins page opens for a plugin: click the
+ * plugin's row in 插件 and whatever it contributes here renders on that plugin's
+ * own page under a 设置 heading. It is where `dsh-mnemon` and `dsh-context` put
+ * their settings — and the page that lists plugins is the sidebar's, not the
+ * Settings dialog's.
+ *
+ * The slot is KEYED, so a registrant identifies itself with `key` (not `id`) —
+ * here this bundle's own package name, which is what routes the contribution to
+ * this plugin's page.
+ *
+ * NOT a managed slot: it is a door INTO the manager, not something the manager
+ * arranges, so the patches ignore it.
+ */
+const BUNDLE_CONFIG_SLOT = 'plugins.bundle.config'
+/** Dispatch key = this bundle's package name. */
+const BUNDLE_KEY = 'dsh-slots-manager'
+
+/** Policy for ONE slot: id → override. */
+interface SlotPolicy {
   hidden: Record<string, boolean>
   order: Record<string, number>
   labels: Record<string, string>
 }
+
+/**
+ * The persisted policy document. Keyed by slot so two slots that happen to use
+ * the same id cannot collide — and they do: `dsh-client-ui-plugin-manager`
+ * registers the sidebar panel id `plugins`, which is also a settings section id.
+ *
+ * `version` exists for future shape evolution; there is no migration, because
+ * this plugin has never shipped another shape.
+ */
+interface PolicyDoc {
+  version: number
+  slots: Record<string, SlotPolicy>
+}
+
+/** Current document version. */
+const POLICY_VERSION = 1
 
 /** A settings section's registration options as the shell sees them. */
 interface SectionOptions {
@@ -122,23 +174,39 @@ interface RemoteService {
   settings: SettingsWire
 }
 
-/** The plugin's policy API (shared by patches, UI, and the test seam). */
+/**
+ * One slot's policy API. Every method is scoped to a single slot, so the
+ * signature is unchanged from the single-slot build — the slot lives in the
+ * object, not in every call. Obtained from {@link PolicyStore.forSlot}.
+ */
 interface Policy {
+  /** The slot key this view is bound to. */
+  readonly slot: string
   isHidden(id: string): boolean
   orderFor(id: string): number | undefined
   labelFor(id: string): string | undefined
   effectiveOrder(id: string, registeredOrder?: number): number
-  /** Replace the in-memory policy from a server-resolved document (no write). */
-  load(doc: PolicyDoc): void
   setHidden(id: string, hidden: boolean): void
-  setOrder(id: string, order: number): void
   setOrders(orders: Record<string, number>): void
   setLabel(id: string, label: string): void
   reset(id: string): void
+  /** Clear every override for THIS slot (other slots are untouched). */
   resetAll(): void
-  applyToRead(options: SectionOptions): SectionOptions
+}
+
+/**
+ * The whole policy document, shared by every slot view. Owns persistence, the
+ * change emitter, and the server-load path.
+ */
+interface PolicyStore {
+  /** The cached policy view for one managed slot. */
+  forSlot(slot: string): Policy
+  /** Replace in-memory state from a server-resolved document (no write back). */
+  load(raw: unknown): void
   subscribe(fn: () => void): () => void
   setOnChanged(fn: () => void): void
+  /** Every slot's policy, copied — the shape that gets persisted. */
+  snapshot(): PolicyDoc
 }
 
 /** One row shown in the manager panel. */
@@ -152,11 +220,25 @@ interface SectionRow {
   seq: number
 }
 
+/**
+ * One recorded registration. Holds the ORIGINAL values so the read paths can
+ * always compute an effective value (`policy ?? original`) — that is what makes
+ * reset() restoring the plugin's own values a no-op instead of extra bookkeeping.
+ */
+interface InvRow {
+  id: string
+  order: number
+  label?: unknown
+  priority: number
+  registrant?: string
+}
+
 /** The slot-registry patch handle. */
 interface Patch {
   installed: boolean
   origEntries: (key: string) => readonly StoredEntry[]
-  inventory: Map<string, { id: string; order: number; label?: unknown; priority: number }>
+  /** slot key → (entry id → original registration facts). */
+  inventory: Map<string, Map<string, InvRow>>
   bump: () => void
 }
 
@@ -168,35 +250,58 @@ type Place = 'before' | 'after'
 
 const zh = {
   nav: '设置编排',
-  hint: '管理各插件在全局设置中的显示与排序，改动即时生效。隐藏的分区不再出现在设置导航；拖拽或按钮可调整顺序。',
+  hint: '管理各插件在界面上提供的分区与按钮：隐藏、排序、改名，改动即时生效。',
   hide: '隐藏',
   show: '显示',
   moveUp: '上移',
   moveDown: '下移',
   reset: '重置',
   resetAll: '全部重置',
+  resetSlot: '重置本槽位',
   hiddenTag: '已隐藏',
-  noSections: '暂无已注册的设置分区',
-  selfNote: '本分区由 dsh-settings-manager 提供，不可隐藏。',
+  empty: '暂无注册项',
+  selfNote: '本分区由 dsh-slots-manager 提供，不可隐藏。',
   dragHint: '拖拽调整顺序',
   rename: '改名',
   renamePlaceholder: '输入新名称…',
+  /** Group headings. */
+  'group.settings': '设置页',
+  'group.sidebar': '左侧边栏',
+  /** Slot display names (see slots.ts `navKeyFor`). */
+  'slotNav.settings.section': '设置分区',
+  'slotNav.sidebar.panellist': '面板按钮',
+  'slotNav.sidebar.footer.action': '栏底动作',
+  /** One-line explanation per slot (see slots.ts `hintKeyFor`). */
+  'slotHint.settings.section': '设置对话框左侧导航里的分区',
+  'slotHint.sidebar.panellist': '左侧栏的图标按钮',
+  'slotHint.sidebar.footer.action':
+    'Settings 旁边的底栏动作；部分动作在提供它的插件里也有自己的显示开关',
 }
 const en = {
   nav: 'Settings Manager',
-  hint: 'Manage how plugin sections appear in global settings. Changes apply instantly: hidden sections leave the settings nav; drag or use the arrows to reorder.',
+  hint: 'Manage the sections and buttons plugins contribute to the UI: hide, reorder, rename. Changes apply instantly.',
   hide: 'Hide',
   show: 'Show',
   moveUp: 'Move up',
   moveDown: 'Move down',
   reset: 'Reset',
   resetAll: 'Reset all',
+  resetSlot: 'Reset this slot',
   hiddenTag: 'Hidden',
-  noSections: 'No settings sections registered',
-  selfNote: 'Provided by dsh-settings-manager; cannot be hidden.',
+  empty: 'Nothing registered yet',
+  selfNote: 'Provided by dsh-slots-manager; cannot be hidden.',
   dragHint: 'Drag to reorder',
   rename: 'Rename',
   renamePlaceholder: 'Enter new name…',
+  'group.settings': 'Settings',
+  'group.sidebar': 'Left sidebar',
+  'slotNav.settings.section': 'Settings sections',
+  'slotNav.sidebar.panellist': 'Panel buttons',
+  'slotNav.sidebar.footer.action': 'Footer actions',
+  'slotHint.settings.section': 'The entries in the Settings dialog nav',
+  'slotHint.sidebar.panellist': 'The icon buttons in the left sidebar',
+  'slotHint.sidebar.footer.action':
+    'Actions beside Settings at the sidebar foot; some also have a show/hide switch in their own plugin',
 }
 
 /* ------------------------------------------------------------------ *
@@ -244,7 +349,7 @@ const PANEL_CSS = [
 function insertStyles(css: string): () => void {
   if (typeof document === 'undefined') return () => {}
   const style = document.createElement('style')
-  style.setAttribute('data-plugin', 'dsh-settings-manager')
+  style.setAttribute('data-plugin', 'dsh-slots-manager')
   style.textContent = css
   document.head.append(style)
   return () => style.remove()
@@ -274,15 +379,59 @@ function createEmitter() {
 }
 
 /* ------------------------------------------------------------------ *
- * Policy store (localStorage-backed)
+ * Policy store (server-backed through `remote.settings`)
  * ------------------------------------------------------------------ */
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-function createPolicy(persist: (doc: PolicyDoc) => void): Policy {
-  const state: PolicyDoc = { hidden: {}, order: {}, labels: {} }
+/** Coerce an untrusted server value into a slot policy (never throws). */
+function normalizeSlotPolicy(raw: unknown): SlotPolicy {
+  const out: SlotPolicy = { hidden: {}, order: {}, labels: {} }
+  if (!isRecord(raw)) return out
+  if (isRecord(raw.hidden)) {
+    for (const [id, value] of Object.entries(raw.hidden)) {
+      if (value === true) out.hidden[id] = true
+    }
+  }
+  if (isRecord(raw.order)) {
+    for (const [id, value] of Object.entries(raw.order)) {
+      if (typeof value === 'number' && Number.isFinite(value)) out.order[id] = value
+    }
+  }
+  if (isRecord(raw.labels)) {
+    for (const [id, value] of Object.entries(raw.labels)) {
+      if (typeof value === 'string' && value.length > 0) out.labels[id] = value
+    }
+  }
+  return out
+}
+
+/**
+ * Coerce an untrusted server document into the current shape (never throws).
+ * Unknown slots are dropped — only managed slots are ever written.
+ */
+function normalizeDoc(raw: unknown): Record<string, SlotPolicy> {
+  const out: Record<string, SlotPolicy> = {}
+  if (!isRecord(raw) || !isRecord(raw.slots)) return out
+  for (const [slot, value] of Object.entries(raw.slots)) {
+    if (!MANAGED_KEYS.has(slot)) continue
+    out[slot] = normalizeSlotPolicy(value)
+  }
+  return out
+}
+
+/**
+ * The policy document, plus one bound {@link Policy} view per managed slot.
+ *
+ * The store owns everything document-wide (persistence, the change emitter,
+ * the server-load path); each view owns exactly one slot. Splitting it this way
+ * keeps a policy call slot-independent — `forSlot(slot).setHidden(id, true)` —
+ * instead of threading a slot argument through every method.
+ */
+function createPolicyStore(persist: (doc: PolicyDoc) => void): PolicyStore {
+  const state: PolicyDoc = { version: POLICY_VERSION, slots: {} }
   // Set on the first user mutation: the in-memory state becomes authoritative
   // and a late server load (describe resolving after the user acted) is ignored
   // so it can't clobber a fresher change.
@@ -291,12 +440,40 @@ function createPolicy(persist: (doc: PolicyDoc) => void): Policy {
   const emitter = createEmitter()
   let onChanged: (() => void) | null = null
 
-  // Write the full in-memory policy to the server (fire-and-forget; the in
+  /** Writable slice — created on first mutation. */
+  function writable(slot: string): SlotPolicy {
+    let current = state.slots[slot]
+    if (current === undefined) {
+      current = { hidden: {}, order: {}, labels: {} }
+      state.slots[slot] = current
+    }
+    return current
+  }
+
+  /** Read-only slice — never creates an entry for an untouched slot. */
+  function readable(slot: string): SlotPolicy | undefined {
+    return state.slots[slot]
+  }
+
+  /** Deep copy of everything, in the persisted shape. */
+  function snapshot(): PolicyDoc {
+    const slots: Record<string, SlotPolicy> = {}
+    for (const [slot, value] of Object.entries(state.slots)) {
+      slots[slot] = {
+        hidden: { ...value.hidden },
+        order: { ...value.order },
+        labels: { ...value.labels },
+      }
+    }
+    return { version: POLICY_VERSION, slots }
+  }
+
+  // Write the full in-memory document to the server (fire-and-forget; the in
   // memory state is the UI's source of truth and is already updated). A
   // failed write is swallowed — the next change re-sends the whole document.
   function save(): void {
     try {
-      persist({ hidden: { ...state.hidden }, order: { ...state.order }, labels: { ...state.labels } })
+      persist(snapshot())
     } catch (error) {
       /* a failed persist must not break a policy mutation */
     }
@@ -320,89 +497,94 @@ function createPolicy(persist: (doc: PolicyDoc) => void): Policy {
     emit()
   }
 
-  return {
-    load(doc) {
-      if (mutated) return
-      state.hidden = isRecord(doc.hidden) ? (doc.hidden as Record<string, boolean>) : {}
-      state.order = isRecord(doc.order) ? (doc.order as Record<string, number>) : {}
-      state.labels = isRecord(doc.labels) ? (doc.labels as Record<string, string>) : {}
-      emit()
-    },
-    isHidden(id) {
-      return id !== OWN_ID && state.hidden[id] === true
-    },
-    orderFor(id) {
-      const value = state.order[id]
-      return typeof value === 'number' && Number.isFinite(value) ? value : undefined
-    },
-    labelFor(id) {
-      const value = state.labels[id]
-      return typeof value === 'string' && value.length > 0 ? value : undefined
-    },
-    effectiveOrder(id, registeredOrder) {
-      const value = this.orderFor(id)
-      return value !== undefined ? value : (typeof registeredOrder === 'number' ? registeredOrder : 0)
-    },
-    setHidden(id, hidden) {
-      if (id === OWN_ID) return
-      mutated = true
-      if (hidden) state.hidden[id] = true
-      else delete state.hidden[id]
-      changed()
-    },
-    setOrder(id, order) {
-      mutated = true
-      if (typeof order === 'number' && Number.isFinite(order)) state.order[id] = order
-      else delete state.order[id]
-      changed()
-    },
-    setOrders(orders) {
-      let dirty = false
-      for (const [id, order] of Object.entries(orders)) {
-        if (typeof order === 'number' && Number.isFinite(order)) {
-          if (state.order[id] !== order) {
+  const views = new Map<string, Policy>()
+
+  function createView(slot: string): Policy {
+    /** This plugin's own section is never hideable, so its UI stays reachable. */
+    const isOwn = (id: string): boolean => slot === SECTION_SLOT && id === OWN_ID
+
+    const view: Policy = {
+      slot,
+      isHidden(id) {
+        if (isOwn(id)) return false
+        return readable(slot)?.hidden[id] === true
+      },
+      orderFor(id) {
+        const value = readable(slot)?.order[id]
+        return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+      },
+      labelFor(id) {
+        const value = readable(slot)?.labels[id]
+        return typeof value === 'string' && value.length > 0 ? value : undefined
+      },
+      effectiveOrder(id, registeredOrder) {
+        const value = view.orderFor(id)
+        return value !== undefined ? value : (typeof registeredOrder === 'number' ? registeredOrder : 0)
+      },
+      setHidden(id, hidden) {
+        if (isOwn(id)) return
+        mutated = true
+        const target = writable(slot)
+        if (hidden) target.hidden[id] = true
+        else delete target.hidden[id]
+        changed()
+      },
+      setOrders(orders) {
+        let dirty = false
+        for (const [id, order] of Object.entries(orders)) {
+          const existing = readable(slot)?.order[id]
+          if (typeof order === 'number' && Number.isFinite(order)) {
+            if (existing !== order) {
+              mutated = true
+              writable(slot).order[id] = order
+              dirty = true
+            }
+          } else if (existing !== undefined) {
             mutated = true
-            state.order[id] = order
+            delete writable(slot).order[id]
             dirty = true
           }
-        } else if (id in state.order) {
-          mutated = true
-          delete state.order[id]
-          dirty = true
         }
+        if (dirty) changed()
+      },
+      setLabel(id, label) {
+        mutated = true
+        const target = writable(slot)
+        const value = typeof label === 'string' ? label.trim() : ''
+        if (value.length > 0) target.labels[id] = value
+        else delete target.labels[id]
+        changed()
+      },
+      reset(id) {
+        mutated = true
+        const target = writable(slot)
+        delete target.hidden[id]
+        delete target.order[id]
+        delete target.labels[id]
+        changed()
+      },
+      resetAll() {
+        mutated = true
+        delete state.slots[slot]
+        changed()
+      },
+    }
+    return view
+  }
+
+  return {
+    forSlot(slot) {
+      let view = views.get(slot)
+      if (view === undefined) {
+        view = createView(slot)
+        views.set(slot, view)
       }
-      if (dirty) changed()
+      return view
     },
-    setLabel(id, label) {
-      mutated = true
-      const value = typeof label === 'string' ? label.trim() : ''
-      if (value.length > 0) state.labels[id] = value
-      else delete state.labels[id]
-      changed()
-    },
-    reset(id) {
-      mutated = true
-      delete state.hidden[id]
-      delete state.order[id]
-      delete state.labels[id]
-      changed()
-    },
-    resetAll() {
-      mutated = true
-      state.hidden = {}
-      state.order = {}
-      state.labels = {}
-      changed()
-    },
-    applyToRead(options) {
-      const order = this.orderFor(options.id)
-      const label = this.labelFor(options.id)
-      if (order === undefined && label === undefined) return options
-      return {
-        ...options,
-        ...(order !== undefined ? { order } : {}),
-        ...(label !== undefined ? { label: () => label } : {}),
-      }
+    load(raw) {
+      if (mutated) return
+      state.slots = normalizeDoc(raw)
+      emit()
     },
     subscribe(fn) {
       return emitter.subscribe(fn)
@@ -410,6 +592,7 @@ function createPolicy(persist: (doc: PolicyDoc) => void): Policy {
     setOnChanged(fn) {
       onChanged = fn
     },
+    snapshot,
   }
 }
 
@@ -429,7 +612,7 @@ interface PatchTarget {
  * the service instance (`Object.getPrototypeOf`), so no official package is
  * imported at runtime.
  */
-function installPatches(ctx: Context, policy: Policy): Patch {
+function installPatches(ctx: Context, store: PolicyStore): Patch {
   let slotsService: unknown
   try {
     slotsService = ctx.get('slots')
@@ -444,71 +627,139 @@ function installPatches(ctx: Context, policy: Policy): Patch {
   } catch (error) {
     proto = undefined
   }
+  // NB: `register` is assigned on the prototype AFTER the class body
+  // (`SlotRegistry.prototype.register = ...`), unlike `entries`/`entriesOfSlot`
+  // which are class members. Existence must therefore be probed on the
+  // instance's prototype, never grepped for in the source.
   if (!proto || typeof proto.register !== 'function') return { installed: false } as Patch
 
-  // Re-apply (e.g. HMR reload): rewire the active policy + ctx so the already
+  // Re-apply (e.g. HMR reload): rewire the active store + ctx so the already
   // installed patches keep working with the fresh state, and hand back the
   // stored interface — returning a bare `{ installed: true }` here would make
   // apply() crash on `patch.bump`.
-  if (proto.__settingsManagerPatched) {
-    const holder = proto.__settingsManagerPolicy as { current: Policy } | undefined
-    if (holder) holder.current = policy
-    proto.__settingsManagerCtx = ctx
-    return (proto.__settingsManagerInterface as Patch) || ({ installed: true } as Patch)
+  if (proto.__slotsManagerPatched) {
+    const holder = proto.__slotsManagerPolicy as { current: PolicyStore } | undefined
+    if (holder) holder.current = store
+    proto.__slotsManagerCtx = ctx
+    return (proto.__slotsManagerInterface as Patch) || ({ installed: true } as Patch)
   }
 
-  // Patches read the policy through a holder so HMR re-apply can repoint it
+  // Patches read the store through a holder so HMR re-apply can repoint it
   // without re-installing (and re-nesting) the wrappers.
-  const policyHolder: { current: Policy } = { current: policy }
+  const policyHolder: { current: PolicyStore } = { current: store }
 
   const origRegister = proto.register
   const origEntries = proto.entries
   const origEntriesOfSlot = proto.entriesOfSlot
-  const inventory = new Map<string, { id: string; order: number; label?: unknown; priority: number }>()
 
-  // 1) Registration path: every settings.section registration flows through
-  //    the manager. v1 only observes (records the inventory) — it does NOT
-  //    mutate the stored options, so reset() can always restore the original.
+  // One inventory per managed slot, built up front so the read paths never have
+  // to care whether a slot has registered anything yet.
+  const inventory = new Map<string, Map<string, InvRow>>()
+  for (const slot of MANAGED_SLOTS) inventory.set(slot.key, new Map())
+
+  /** Extract the original facts of a registration into an inventory row. */
+  function snapshotRow(options: Record<string, unknown>): InvRow {
+    return {
+      id: String(options.id),
+      order: typeof options.order === 'number' ? options.order : 0,
+      label: options.label,
+      priority: typeof options.priority === 'number' ? options.priority : 0,
+      registrant: typeof options.registrant === 'string' ? options.registrant : undefined,
+    }
+  }
+
+  /**
+   * The options a reader should see: the override when one exists, otherwise
+   * the ORIGINAL recorded at registration time. Always writing the effective
+   * value (rather than only writing when an override exists) is what makes
+   * reset() restore the plugin's own values with no extra bookkeeping — once
+   * the override is gone, the next read recomputes the original.
+   */
+  function effective(p: Policy, options: SectionOptions, original?: InvRow): SectionOptions {
+    const order = p.orderFor(options.id) ?? original?.order
+    const label = p.labelFor(options.id) ?? original?.label
+    return {
+      ...options,
+      ...(order !== undefined ? { order } : {}),
+      ...(label !== undefined
+        ? { label: typeof label === 'function' ? (label as () => string) : () => String(label) }
+        : {}),
+    }
+  }
+
+  // 1) Registration path: record the ORIGINAL facts only. The stored options
+  //    are never mutated here.
   proto.register = function register(rawOptions, component) {
-    if (rawOptions && rawOptions.name === SECTION_SLOT && typeof rawOptions.id === 'string') {
-      inventory.set(rawOptions.id, {
-        id: rawOptions.id,
-        order: typeof rawOptions.order === 'number' ? rawOptions.order : 0,
-        label: rawOptions.label,
-        priority: typeof rawOptions.priority === 'number' ? rawOptions.priority : 0,
-      })
+    const slot = rawOptions ? rawOptions.name : undefined
+    if (
+      typeof slot === 'string' &&
+      MANAGED_KEYS.has(slot) &&
+      typeof rawOptions.id === 'string' &&
+      rawOptions.id !== TOUCH_ID
+    ) {
+      inventory.get(slot)?.set(rawOptions.id, snapshotRow(rawOptions))
     }
     return origRegister.call(this, rawOptions, component)
   }
 
-  // 2) Read path (nav): filter hidden + rewrite order/label on read.
+  /**
+   * Original facts for one entry, captured on FIRST SIGHT when the registration
+   * predates the patch. That case is real and load-bearing: the base sections
+   * (General / Models / Plugins) register before any profile plugin is applied,
+   * so their registrations never pass through `register` above. Without this
+   * capture, the in-place rewrite on the `entriesOfSlot` path would strand the
+   * entry on its overridden value — reset() would have no pristine original to
+   * fall back to. The first read always sees the entry untouched.
+   */
+  function originalFor(slot: string, options: SectionOptions): InvRow | undefined {
+    const originals = inventory.get(slot)
+    if (originals === undefined) return undefined
+    let row = originals.get(options.id)
+    if (row === undefined) {
+      row = snapshotRow(options as Record<string, unknown>)
+      originals.set(options.id, row)
+    }
+    return row
+  }
+
+  // 2) `entries` (list readers — the Settings shell builds its nav from this):
+  //    filter hidden and rewrite order/label. Cloning is safe on this path (no
+  //    isLive check) and keeps the caller's array independent of the ledger.
   proto.entries = function entries(key) {
     const rows = origEntries.call(this, key)
-    if (key !== SECTION_SLOT) return rows
-    const p = policyHolder.current
+    if (!MANAGED_KEYS.has(key)) return rows
+    const p = policyHolder.current.forSlot(key)
     const out: StoredEntry[] = []
     for (const entry of rows) {
-      if (p.isHidden(entry.options.id)) continue
-      const order = p.orderFor(entry.options.id)
-      const label = p.labelFor(entry.options.id)
-      if (order === undefined && label === undefined) {
-        out.push(entry)
-        continue
-      }
-      out.push({ ...entry, options: p.applyToRead(entry.options) })
+      const id = entry.options.id
+      if (p.isHidden(id)) continue
+      out.push({ ...entry, options: effective(p, entry.options, originalFor(key, entry.options)) })
     }
     return out
   }
 
-  // 3) Read path (content): filter hidden — filter only, never clone (the
-  //    renderer runs an isLive check on the returned entries).
+  // 3) `entriesOfSlot` (renderer election, and the sidebar's own panel list):
+  //    filter hidden, then REPLACE `entry.options` — the entry object keeps its
+  //    identity because the renderer's isLive check compares entries by
+  //    identity (`rec.entries.includes(entry)`), so returning a clone throws
+  //    StaleAuthorizationError. This is also the only path the sidebar reads
+  //    `options.order` / `options.label` from, so the rewrite must land here
+  //    for ordering and renaming to reach it.
   proto.entriesOfSlot = function entriesOfSlot(key) {
     const rows = origEntriesOfSlot.call(this, key)
-    if (key !== SECTION_SLOT) return rows
-    return rows.filter((entry) => !policyHolder.current.isHidden(entry.options.id))
+    if (!MANAGED_KEYS.has(key)) return rows
+    const p = policyHolder.current.forSlot(key)
+    const out: StoredEntry[] = []
+    for (const entry of rows) {
+      const id = entry.options.id
+      if (p.isHidden(id)) continue
+      entry.options = effective(p, entry.options, originalFor(key, entry.options))
+      out.push(entry)
+    }
+    return out
   }
 
-  proto.__settingsManagerPatched = true
+  proto.__slotsManagerPatched = true
 
   const iface: Patch = {
     installed: true,
@@ -516,22 +767,36 @@ function installPatches(ctx: Context, policy: Policy): Patch {
     inventory,
     bump() {
       try {
-        const activeCtx = (proto.__settingsManagerCtx || ctx) as Context
+        const activeCtx = (proto.__slotsManagerCtx || ctx) as Context
         const slots = activeCtx.get('slots')
         if (!slots) return
-        const disposer = slots.register(
-          { name: SECTION_SLOT, id: TOUCH_ID, order: 1e9, priority: 100, label: () => '' },
-          () => null,
-        )
-        if (typeof disposer === 'function') disposer()
+        // EVERY managed slot, not just one. Each slot has its own version
+        // counter and its own subscribers, and they are independent: the
+        // Settings shell re-reads `settings.section`, while the sidebar
+        // re-reads `sidebar.panellist` on THAT slot's version change
+        //
+        //   ctx.slots.subscribe("sidebar.panellist", syncPanels)
+        //
+        // so bumping a single slot left every other slot's readers stale — a
+        // hidden panel button did not disappear until something else forced a
+        // re-read (a page reload). Registering and immediately disposing one
+        // throwaway entry per slot moves each version once; listeners flush on
+        // a microtask, after both mutations, so nothing transient renders.
+        for (const descriptor of MANAGED_SLOTS) {
+          const disposer = slots.register(
+            { name: descriptor.key, id: TOUCH_ID, order: 1e9, priority: 100, label: () => '' },
+            () => null,
+          )
+          if (typeof disposer === 'function') disposer()
+        }
       } catch (error) {
         /* best effort — a failed bump only delays the re-read */
       }
     },
   }
-  proto.__settingsManagerPolicy = policyHolder
-  proto.__settingsManagerCtx = ctx
-  proto.__settingsManagerInterface = iface
+  proto.__slotsManagerPolicy = policyHolder
+  proto.__slotsManagerCtx = ctx
+  proto.__slotsManagerInterface = iface
   return iface
 }
 
@@ -541,6 +806,22 @@ function installPatches(ctx: Context, policy: Policy): Patch {
 
 const styles: Record<string, React.CSSProperties> = {
   wrap: { padding: '4px 2px' },
+  // Group heading ("设置页" / "左侧边栏").
+  groupHeading: {
+    fontSize: '11px', fontWeight: 600, lineHeight: '16px', letterSpacing: '.04em',
+    textTransform: 'uppercase', color: 'var(--dsw-alias-label-caption)',
+    margin: '14px 0 6px',
+  },
+  // One slot's block inside a group.
+  slotBlock: { marginBottom: '10px' },
+  slotHint: {
+    fontSize: '11px', lineHeight: '15px', color: 'var(--dsw-alias-label-caption)',
+    margin: '0 0 6px',
+  },
+  /** Per-slot header row: name + registered count + scoped reset. */
+  slotHeading: { display: 'inline-flex', alignItems: 'baseline', gap: '6px', minWidth: 0 },
+  slotNav: { fontSize: '13px', fontWeight: 600, lineHeight: '18px', color: 'var(--dsw-alias-label-primary)' },
+  slotCount: { fontSize: '11px', lineHeight: '15px', color: 'var(--dsw-alias-label-caption)' },
   header: {
     display: 'flex', alignItems: 'center', justifyContent: 'space-between',
     gap: '12px', marginBottom: '12px',
@@ -669,21 +950,25 @@ function resolvePlace(clientY: number, rect: DOMRect, current: Place | null): Pl
   return current ?? (clientY < mid ? 'before' : 'after')
 }
 
-/** The environment handed to the manager component. */
-interface ManagerEnv {
+/** The environment handed to one slot's panel. */
+interface SlotPanelEnv {
   slots: SlotsService
+  /** The document, for change notification (a policy edit in any slot re-renders). */
+  store: PolicyStore
+  /** The policy view bound to this panel's slot. */
   policy: Policy
-  readSections: () => SectionRow[]
+  descriptor: SlotDescriptor
+  readRows: () => SectionRow[]
   reorder: (movedId: string, targetId: string, place: Place) => void
-  reset: (id: string) => void
-  resetAll: () => void
   t: (key: string) => string
 }
 
-function createManagerSection(env: ManagerEnv): React.FC {
-  const { slots, policy, readSections, reorder, reset, resetAll, t } = env
+function createSlotPanel(env: SlotPanelEnv): React.FC {
+  const { slots, store, policy, descriptor, readRows, reorder, t } = env
+  const slotKey = descriptor.key
+  const capability = descriptor.capability
 
-  function ManagerSection(): React.ReactElement {
+  function SlotPanel(): React.ReactElement {
     const [, force] = React.useReducer((value: number) => value + 1, 0)
     const dragId = React.useRef<string | null>(null)
     const [overId, setOverId] = React.useState<string | null>(null)
@@ -700,18 +985,18 @@ function createManagerSection(env: ManagerEnv): React.FC {
       let offSlot: () => void = () => {}
       let offPolicy: () => void = () => {}
       try {
-        offSlot = slots.subscribe(SECTION_SLOT, force)
+        offSlot = slots.subscribe(slotKey, force)
       } catch (error) {
         /* slot subscription is best effort */
       }
-      offPolicy = policy.subscribe(force)
+      offPolicy = store.subscribe(force)
       return () => {
         offSlot()
         offPolicy()
       }
     }, [])
 
-    const rows = readSections()
+    const rows = readRows()
 
     function clearDragTarget(): void {
       if (overId !== null || overPlace !== null || indicatorY !== null) {
@@ -842,7 +1127,9 @@ function createManagerSection(env: ManagerEnv): React.FC {
     }
 
     function renderRow(row: SectionRow, index: number): React.ReactElement {
-      const isOwn = row.id === OWN_ID
+      // This plugin's own section lives in settings.section only, and is never
+      // hideable — otherwise a user could lock themselves out of the manager.
+      const isOwn = slotKey === SECTION_SLOT && row.id === OWN_ID
       const editing = editingId === row.id
       const dragging = !editing && dragId.current === row.id
       const className = ['dsm-row', dragging ? 'dsm-row-dragging' : ''].filter(Boolean).join(' ')
@@ -869,7 +1156,10 @@ function createManagerSection(env: ManagerEnv): React.FC {
         'li',
         {
           key: row.id,
-          draggable: !editing,
+          // A slot whose registrants declare no `label` (e.g. footer actions)
+          // has nothing to rename, so the row is not draggable-independent but
+          // simply not renamable — see the action cluster below.
+          draggable: capability.order && !editing,
           className,
           style: styles.row,
           onDragStart: (e: React.DragEvent<HTMLLIElement>) => handleDragStart(e, row.id),
@@ -893,65 +1183,79 @@ function createManagerSection(env: ManagerEnv): React.FC {
             `${row.id}${row.registrant ? ' · ' + row.registrant : ''}`,
           ),
         ),
-        React.createElement(
-          'button',
-          {
-            type: 'button',
-            className: 'dsm-switch',
-            role: 'switch',
-            'aria-checked': !row.hidden,
-            disabled: isOwn,
-            title: isOwn ? t('selfNote') : (row.hidden ? t('show') : t('hide')),
-            onClick: () => policy.setHidden(row.id, !row.hidden),
-            style: {
-              ...styles.switchTrack,
-              ...(row.hidden ? {} : { background: 'var(--dsw-alias-state-success-primary)' }),
-            },
-          },
-          React.createElement('span', {
-            className: 'dsm-switch-knob',
-            style: {
-              ...styles.switchKnob,
-              transform: row.hidden ? 'translateX(0)' : 'translateX(14px)',
-            },
-          }),
-        ),
+        capability.hide
+          ? React.createElement(
+              'button',
+              {
+                type: 'button',
+                className: 'dsm-switch',
+                role: 'switch',
+                'aria-checked': !row.hidden,
+                disabled: isOwn,
+                title: isOwn ? t('selfNote') : (row.hidden ? t('show') : t('hide')),
+                onClick: () => policy.setHidden(row.id, !row.hidden),
+                style: {
+                  ...styles.switchTrack,
+                  ...(row.hidden ? {} : { background: 'var(--dsw-alias-state-success-primary)' }),
+                },
+              },
+              React.createElement('span', {
+                className: 'dsm-switch-knob',
+                style: {
+                  ...styles.switchKnob,
+                  transform: row.hidden ? 'translateX(0)' : 'translateX(14px)',
+                },
+              }),
+            )
+          : null,
         React.createElement(
           'div',
           { style: styles.rowActions },
-          React.createElement(
-            'button',
-            {
-              type: 'button', className: 'dsm-icon-btn', title: t('moveUp'), 'aria-label': t('moveUp'),
-              style: styles.iconBtn, disabled: prev === undefined,
-              onClick: () => reorder(row.id, prev.id, 'before'),
-            },
-            svgIcon('up'),
-          ),
-          React.createElement(
-            'button',
-            {
-              type: 'button', className: 'dsm-icon-btn', title: t('moveDown'), 'aria-label': t('moveDown'),
-              style: styles.iconBtn, disabled: next === undefined,
-              onClick: () => reorder(row.id, next.id, 'after'),
-            },
-            svgIcon('down'),
-          ),
-          React.createElement(
-            'button',
-            {
-              type: 'button', className: 'dsm-icon-btn', title: t('rename'), 'aria-label': t('rename'),
-              style: styles.iconBtn, disabled: editing,
-              onClick: () => startEdit(row),
-            },
-            svgIcon('pencil'),
-          ),
+          // Reorder arrows are only meaningful when a consumer sorts by order —
+          // every managed slot today does, so the capability gates the whole
+          // cluster rather than each button.
+          capability.order
+            ? React.createElement(
+                'button',
+                {
+                  type: 'button', className: 'dsm-icon-btn', title: t('moveUp'), 'aria-label': t('moveUp'),
+                  style: styles.iconBtn, disabled: prev === undefined,
+                  onClick: () => reorder(row.id, prev.id, 'before'),
+                },
+                svgIcon('up'),
+              )
+            : null,
+          capability.order
+            ? React.createElement(
+                'button',
+                {
+                  type: 'button', className: 'dsm-icon-btn', title: t('moveDown'), 'aria-label': t('moveDown'),
+                  style: styles.iconBtn, disabled: next === undefined,
+                  onClick: () => reorder(row.id, next.id, 'after'),
+                },
+                svgIcon('down'),
+              )
+            : null,
+          // Rename is suppressed entirely (not merely disabled) for slots whose
+          // registrants declare no `label`: there is no projected text to edit,
+          // so offering the control would be a dead end.
+          capability.rename
+            ? React.createElement(
+                'button',
+                {
+                  type: 'button', className: 'dsm-icon-btn', title: t('rename'), 'aria-label': t('rename'),
+                  style: styles.iconBtn, disabled: editing,
+                  onClick: () => startEdit(row),
+                },
+                svgIcon('pencil'),
+              )
+            : null,
           React.createElement(
             'button',
             {
               type: 'button', className: 'dsm-icon-btn', title: t('reset'), 'aria-label': t('reset'),
               style: styles.iconBtn,
-              onClick: () => reset(row.id),
+              onClick: () => policy.reset(row.id),
             },
             svgIcon('reset'),
           ),
@@ -959,27 +1263,36 @@ function createManagerSection(env: ManagerEnv): React.FC {
       )
     }
 
+    // Per-slot header: the slot's display name, its one-line explanation and a
+    // reset scoped to just this slot. The global "reset all" lives in the
+    // manager's own header (class `dsm-reset-all`, kept unique so selectors and
+    // the e2e suite keep resolving to exactly one element).
     const header = React.createElement(
       'div',
       { style: styles.header },
-      React.createElement('p', { style: styles.hint }, t('hint')),
+      React.createElement(
+        'div',
+        { style: styles.slotHeading },
+        React.createElement('span', { style: styles.slotNav }, t(navKeyFor(slotKey))),
+        React.createElement('span', { style: styles.slotCount }, String(rows.length)),
+      ),
       React.createElement(
         'button',
         {
           type: 'button',
-          className: 'dsm-reset-all',
-          onClick: () => resetAll(),
+          className: 'dsm-reset-slot',
+          onClick: () => policy.resetAll(),
           style: styles.resetAllBtn,
-          title: t('resetAll'),
+          title: t('resetSlot'),
         },
         svgIcon('reset'),
-        React.createElement('span', null, t('resetAll')),
+        React.createElement('span', null, t('resetSlot')),
       ),
     )
 
     const body =
       rows.length === 0
-        ? React.createElement('p', { style: styles.empty }, t('noSections'))
+        ? React.createElement('p', { style: styles.empty }, t('empty'))
         : React.createElement(
             'ul',
             {
@@ -1000,6 +1313,110 @@ function createManagerSection(env: ManagerEnv): React.FC {
     return React.createElement('div', { style: styles.wrap }, header, body)
   }
 
+  return SlotPanel
+}
+
+/** The environment handed to the manager component. */
+interface ManagerEnv {
+  slots: SlotsService
+  store: PolicyStore
+  readRows: (slot: string) => SectionRow[]
+  reorder: (slot: string, movedId: string, targetId: string, place: Place) => void
+  t: (key: string) => string
+}
+
+/**
+ * The manager panel: one heading per group, one panel per managed slot.
+ * Both levels are driven by MANAGED_SLOTS / SLOT_GROUPS, so adding a slot is a
+ * table edit in `slots.ts` — nothing here changes.
+ */
+function createManagerSection(env: ManagerEnv): React.FC {
+  const { slots, store, readRows, reorder, t } = env
+
+  // One panel component per slot, built once. Each carries its own drag/edit
+  // state, so reordering in one slot can never touch another.
+  const panels = new Map<string, React.FC>()
+  for (const descriptor of MANAGED_SLOTS) {
+    panels.set(
+      descriptor.key,
+      createSlotPanel({
+        slots,
+        store,
+        policy: store.forSlot(descriptor.key),
+        descriptor,
+        readRows: () => readRows(descriptor.key),
+        reorder: (movedId, targetId, place) => reorder(descriptor.key, movedId, targetId, place),
+        t,
+      }),
+    )
+  }
+
+  function ManagerSection(): React.ReactElement {
+    const [, force] = React.useReducer((value: number) => value + 1, 0)
+
+    React.useEffect(() => {
+      const offs: (() => void)[] = []
+      for (const descriptor of MANAGED_SLOTS) {
+        try {
+          offs.push(slots.subscribe(descriptor.key, force))
+        } catch (error) {
+          /* slot subscription is best effort */
+        }
+      }
+      const offPolicy = store.subscribe(force)
+      return () => {
+        for (const off of offs) off()
+        offPolicy()
+      }
+    }, [])
+
+    const children: React.ReactNode[] = [
+      React.createElement(
+        'div',
+        { style: styles.header },
+        React.createElement('p', { style: styles.hint }, t('hint')),
+        React.createElement(
+          'button',
+          {
+            type: 'button',
+            className: 'dsm-reset-all',
+            onClick: () => {
+              for (const descriptor of MANAGED_SLOTS) store.forSlot(descriptor.key).resetAll()
+            },
+            style: styles.resetAllBtn,
+            title: t('resetAll'),
+          },
+          svgIcon('reset'),
+          React.createElement('span', null, t('resetAll')),
+        ),
+      ),
+    ]
+
+    for (const group of SLOT_GROUPS) {
+      const descriptors = MANAGED_SLOTS.filter((slot) => slot.group === group.id)
+      if (descriptors.length === 0) continue
+      children.push(
+        React.createElement('h3', { key: `group-${group.id}`, style: styles.groupHeading }, t(group.navKey)),
+      )
+      for (const descriptor of descriptors) {
+        const Panel = panels.get(descriptor.key)
+        if (Panel === undefined) continue
+        children.push(
+          React.createElement(
+            'section',
+            // `data-slot` lets tests (and anyone inspecting the DOM) address one
+            // slot's list without relying on row order across groups.
+            { key: descriptor.key, 'data-slot': descriptor.key, style: styles.slotBlock },
+            React.createElement('p', { style: styles.slotHint }, t(hintKeyFor(descriptor.key))),
+            React.createElement(Panel),
+          ),
+        )
+      }
+    }
+
+    return React.createElement('div', { style: styles.wrap }, children)
+  }
+
   return ManagerSection
 }
 
@@ -1009,21 +1426,29 @@ function createManagerSection(env: ManagerEnv): React.FC {
 
 /** The __test seam (attached to globalThis only under the test flag). */
 interface TestSeam {
+  /** The whole document: load a server payload, snapshot the persisted shape. */
+  store: PolicyStore
+  /** Policy view bound to `settings.section`. */
   policy: Policy
+  /** Row readers/mutators bound to `settings.section`. */
   readSections: () => SectionRow[]
   reorder: (movedId: string, targetId: string, place: Place) => void
   setOrders: (orders: Record<string, number>) => void
-  reset: (id: string) => void
   resetAll: () => void
+  /** Slot-explicit surface, for tests covering slots beyond settings.section. */
+  policyFor: (slot: string) => Policy
+  /** The managed-slot table itself, so tests can assert the declared capabilities. */
+  descriptors: readonly SlotDescriptor[]
   patch: Patch
-  inventory: Map<string, { id: string; order: number; label?: unknown; priority: number }>
+  /** Registration inventory for `settings.section`. */
+  inventory: Map<string, InvRow>
 }
 
 function globals(): any {
   return globalThis as any
 }
 
-export const name = 'dsh-settings-manager'
+export const name = 'dsh-slots-manager'
 export const inject = ['slots', 'locale', 'remote', 'remote.settings']
 
 export function apply(ctx: Context): void {
@@ -1039,18 +1464,18 @@ export function apply(ctx: Context): void {
         locale.register(LOCALE_NS, { zh, en })
         return () => {}
       },
-      'dsh-settings-manager: dictionaries',
+      'dsh-slots-manager: dictionaries',
     )
   }
   const t = locale !== undefined ? locale.bind(LOCALE_NS) : (key: string) => key
 
   // The settings nav clips once many sections register; make it scroll.
-  ctx.effect(() => insertStyles(NAV_SCROLL_CSS + '\n' + PANEL_CSS), 'dsh-settings-manager: styles')
+  ctx.effect(() => insertStyles(NAV_SCROLL_CSS + '\n' + PANEL_CSS), 'dsh-slots-manager: styles')
 
   // Policy first, patches second — every registration from here on (including
   // this plugin's own section) flows through the policy.
   //
-  // Persist the full policy to the server settings namespace `settings-manager`
+  // Persist the full policy to the server settings namespace `slots-manager`
   // (registered by the host half) over the `remote.settings` wire face. If the
   // remote service is unavailable the plugin degrades to in-memory only (no
   // persistence).
@@ -1061,45 +1486,50 @@ export function apply(ctx: Context): void {
       }
     : (): void => {}
 
-  const policy = createPolicy(persist)
-  const patch = installPatches(ctx, policy)
+  const store = createPolicyStore(persist)
+  const patch = installPatches(ctx, store)
   if (!patch.installed) return
-  policy.setOnChanged(patch.bump)
+  store.setOnChanged(patch.bump)
   // Force the shell to re-read at least once after patching.
   patch.bump()
 
   // Load the persisted policy from the server once available (async; the read
   // path shows plugin defaults until it resolves, then re-reads via the bump).
+  // `load` validates the payload itself, so nothing untrusted reaches the state.
   if (settings) {
     void settings
       .describe()
       .then((response) => {
         if (!response.ok) return
-        const value = response.value
-        const ns = value.namespaces.find((row) => row.ns === SECTION_NS)
-        if (ns && isRecord(ns.value)) policy.load(ns.value as unknown as PolicyDoc)
+        const ns = response.value.namespaces.find((row) => row.ns === SECTION_NS)
+        if (ns) store.load(ns.value)
       })
       .catch(() => {})
   }
 
-  /** Raw inventory: ALL sections (hidden included), policy NOT applied. */
-  const readSections = (): SectionRow[] => {
+  /**
+   * Raw inventory of one slot: EVERY entry (hidden included), with the policy
+   * applied for display. Read straight from the unpatched `origEntries`, so the
+   * manager shows what is actually registered rather than what it filters to.
+   */
+  const readRows = (slot: string): SectionRow[] => {
     let entries: readonly StoredEntry[]
     try {
-      entries = patch.origEntries.call(slots, SECTION_SLOT)
+      entries = patch.origEntries.call(slots, slot)
     } catch (error) {
       entries = []
     }
+    const view = store.forSlot(slot)
     return entries
       .map((entry, seq) => {
         const originalLabel = resolveLabel(entry.options.label) || entry.options.id
         return {
           id: entry.options.id,
-          label: policy.labelFor(entry.options.id) ?? originalLabel,
+          label: view.labelFor(entry.options.id) ?? originalLabel,
           originalLabel,
           registrant: entry.options.registrant,
-          order: policy.effectiveOrder(entry.options.id, entry.options.order),
-          hidden: policy.isHidden(entry.options.id),
+          order: view.effectiveOrder(entry.options.id, entry.options.order),
+          hidden: view.isHidden(entry.options.id),
           seq,
         }
       })
@@ -1107,13 +1537,13 @@ export function apply(ctx: Context): void {
   }
 
   /**
-   * Reorder by placing `movedId` immediately before/after `targetId` in the
-   * effective sorted order, then renumber ALL sections to even index*10 slots
-   * so the new arrangement is exact and collision-free (resettable via the
-   * per-row reset / "全部重置").
+   * Reorder within ONE slot: place `movedId` immediately before/after
+   * `targetId` in the effective sorted order, then renumber every entry in that
+   * slot to exact index*10 values so the arrangement is collision-free and the
+   * per-row reset / "全部重置" can drop the overrides wholesale.
    */
-  const reorder = (movedId: string, targetId: string, place: Place): void => {
-    const rows = readSections()
+  const reorder = (slot: string, movedId: string, targetId: string, place: Place): void => {
+    const rows = readRows(slot)
     const src = rows.findIndex((row) => row.id === movedId)
     if (src === -1) return
     const list = rows.map((row) => row.id)
@@ -1126,10 +1556,10 @@ export function apply(ctx: Context): void {
     list.forEach((id, index) => {
       orders[id] = index * 10
     })
-    policy.setOrders(orders)
+    store.forSlot(slot).setOrders(orders)
   }
 
-  const env: ManagerEnv = { slots, policy, readSections, reorder, reset: policy.reset, resetAll: policy.resetAll, t }
+  const env: ManagerEnv = { slots, store, readRows, reorder, t }
   const ManagerSection = createManagerSection(env)
 
   // This plugin's own section — registered through the (patched) slots service
@@ -1147,19 +1577,45 @@ export function apply(ctx: Context): void {
     ),
   )
 
+  // The second door: the SAME panel, on this plugin's own page in the sidebar
+  // Plugins list. The slot is declared by ui-plugin-manager, so `inject` queues
+  // this until that owner mounts — the registration order is not ours to control.
+  //
+  // Keyed by package name: that is what routes the contribution to THIS bundle's
+  // page. No `order`/`label` — keyed slots dispatch by key and the owning page
+  // supplies its own chrome.
+  slots.inject(BUNDLE_CONFIG_SLOT, () =>
+    slots.register(
+      {
+        name: BUNDLE_CONFIG_SLOT,
+        key: BUNDLE_KEY,
+        locale: LOCALE_NS,
+      },
+      () => React.createElement(ManagerSection),
+    ),
+  )
+
   // Test seam: drives policy mutations / read-only inventory from the test
   // harness; never present in production.
-  if (globals().__DSH_SETTINGS_MANAGER_TEST__) {
+  //
+  // The `settings.section`-bound members exist so the original suite (written
+  // against the single-slot build) keeps exercising the SAME code paths without
+  // being rewritten — the binding is the only thing that changed, not the
+  // behaviour under test. Slot-explicit members cover every other slot.
+  if (globals().__DSH_SLOTS_MANAGER_TEST__) {
+    const bound = store.forSlot(SECTION_SLOT)
     const seam: TestSeam = {
-      policy,
-      readSections,
-      reorder,
-      setOrders: policy.setOrders,
-      reset: policy.reset,
-      resetAll: policy.resetAll,
+      store,
+      policy: bound,
+      readSections: () => readRows(SECTION_SLOT),
+      reorder: (movedId, targetId, place) => reorder(SECTION_SLOT, movedId, targetId, place),
+      setOrders: bound.setOrders,
+      resetAll: bound.resetAll,
+      policyFor: (slot) => store.forSlot(slot),
+      descriptors: MANAGED_SLOTS,
       patch,
-      inventory: patch.inventory,
+      inventory: patch.inventory.get(SECTION_SLOT) ?? new Map(),
     }
-    globals().__DSH_SETTINGS_MANAGER_SEAM__ = seam
+    globals().__DSH_SLOTS_MANAGER_SEAM__ = seam
   }
 }
