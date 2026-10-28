@@ -1,7 +1,7 @@
 {
   "name": "dsh-slots-manager",
   "version": "0.1.0",
-  "description": "DSH web plugin: arrange the list slots other plugins contribute to \u2014 show/hide, reorder, rename \u2014 without touching upstream. Ships a slot-agnostic engine (three SlotRegistry.prototype patches) driven by a small managed-slot table; today it manages settings.section, sidebar.panellist and sidebar.footer.action.",
+  "description": "DSH web plugin: arrange the list slots other plugins contribute to — show/hide, reorder, rename — without touching upstream. Ships a slot-agnostic engine (three SlotRegistry.prototype patches) driven by a small managed-slot table; today it manages settings.section, sidebar.panellist and sidebar.footer.action.",
   "type": "module",
   "main": "./lib/host.mjs",
   "exports": {
@@ -18,7 +18,6 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
-    "prepare": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "verify": "node --test",
     "test": "node --test",
