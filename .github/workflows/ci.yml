@@ -20,7 +20,7 @@ permissions:
 # resolve it with the same store layout. Verified that 12.11.2 accepts the
 # existing lockfile unchanged (`--frozen-lockfile` → "Lockfile is up to date").
 env:
-  DSH_VERSION: 0.2.1-alpha.2
+  DSH_VERSION: 0.2.2-alpha.2
   PNPM_VERSION: 12.11.2
 
 jobs:
