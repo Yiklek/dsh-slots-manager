@@ -12,7 +12,15 @@ import { expect } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 
 /** Buttons that dismiss a first-run / onboarding dialog. */
-export const DISMISS_LABELS = ['继续', '稍后配置', '知道了', '关闭此提示']
+/**
+ * Buttons that dismiss a first-run dialog.
+ *
+ * `关闭` is the aria-label of the close cross on the "开始使用" dialog (login or add
+ * an API key). Without it that dialog stays mounted on every load and the account
+ * menu underneath it never opens — every spec then fails inside openSettings
+ * instead of at the thing it was testing.
+ */
+export const DISMISS_LABELS = ['继续', '稍后配置', '知道了', '关闭此提示', '关闭']
 
 /**
  * Resolve the dsh connection URL that establishes the browser session. dsh boot
@@ -41,11 +49,57 @@ export function tokenUrl() {
 export async function dismissOnboarding(page) {
   for (const name of DISMISS_LABELS) {
     const dismiss = page.getByRole('button', { name, exact: true })
-    if ((await dismiss.count()) > 0) {
-      await dismiss.click().catch(() => {})
-      await expect(dismiss).not.toBeVisible({ timeout: 2000 }).catch(() => {})
-    }
+    if ((await dismiss.count()) === 0) continue
+
+    // A label can name two buttons: "关闭" closes the onboarding dialog AND the
+    // Settings dialog once it is open. Clicking the latter closed Settings again,
+    // right after it had been opened, so the next step found no nav. Skip any
+    // dismiss button that lives inside a dialog carrying a nav — that is Settings.
+    const belongsToSettings = await dismiss
+      .first()
+      .evaluate((el) => {
+        const dialog = el.closest('[role="dialog"]')
+        return Boolean(dialog && dialog.querySelector('nav'))
+      })
+      .catch(() => false)
+    if (belongsToSettings) continue
+
+    await dismiss.click().catch(() => {})
+    await expect(dismiss).not.toBeVisible({ timeout: 2000 }).catch(() => {})
   }
+}
+
+/**
+ * Click the entry that opens Settings.
+ *
+ * It is not always a sidebar button named "设置": from 0.2.2-alpha.2 the entry is a
+ * `menuitem` inside the account menu, and its accessible name carries the shortcut
+ * (`设置⌥⌘,`), so `getByRole('button', { name: '设置', exact: true })` matches
+ * nothing at all — which is why every spec failed at openSettings, not at whatever
+ * it was testing.
+ *
+ * Try the old shape first (a plain button), then the account menu. Whichever is
+ * absent simply times out into the next attempt.
+ */
+async function clickSettings(page) {
+  const direct = page.getByRole('button', { name: '设置', exact: true }).first()
+  if ((await direct.count()) > 0 && (await direct.isVisible().catch(() => false))) {
+    await direct.click({ timeout: 2000 })
+    return
+  }
+
+  // The shortcut suffix is part of the accessible name, so anchor instead of exact.
+  const item = page.getByRole('menuitem', { name: /^设置|^Settings/ }).first()
+
+  // The account menu is a toggle: clicking it while it is already open closes it.
+  // A previous openSettings call can leave it open, so only click when the entry is
+  // not already reachable.
+  if (!(await item.isVisible().catch(() => false))) {
+    const account = page.getByRole('button', { name: /账号菜单|Account menu/ }).first()
+    if ((await account.count()) > 0) await account.click({ timeout: 2000 }).catch(() => {})
+  }
+
+  await item.click({ timeout: 3000 })
 }
 
 /** Open the Settings dialog, dismissing first-run dialogs until it sticks. */
@@ -64,7 +118,7 @@ export async function openSettings(page) {
     await dismissOnboarding(page)
 
     try {
-      await page.getByRole('button', { name: '设置', exact: true }).first().click({ timeout: 3000 })
+      await clickSettings(page)
       // The API-key onboarding can mount after Settings is already open.
       await dismissOnboarding(page)
       return true
